@@ -42,7 +42,9 @@ func memoryCollector(path string) ([]MetricSample, error) {
 		}
 
 		key := strings.TrimSpace(keyValueSplit[0])
-		value, err := strconv.Atoi(strings.TrimSpace(strings.Split(strings.TrimSpace(keyValueSplit[1]), " ")[0]))
+		value, err := strconv.Atoi(
+			strings.TrimSpace(strings.Split(strings.TrimSpace(keyValueSplit[1]), " ")[0]),
+		)
 		if err != nil {
 			fmt.Println("Something went wrong")
 		}
@@ -91,10 +93,65 @@ func memoryCollector(path string) ([]MetricSample, error) {
 	return metricsCollected, nil
 }
 
+// i think we are going to have to discuss how we will deal with the different
+// types we will have, so keeping it this nested map
+func diskCollector(path string) ([]MetricSample, error) {
+	timeCollected := time.Now()
+	var metricsCollected []MetricSample
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, errors.New("There was an issue reading the file")
+	}
+
+	lines := strings.Split(strings.TrimSpace(string(data)), "\n")
+
+	for _, line := range lines {
+		fields := strings.Fields(line)
+
+		if len(fields) < 14 {
+			continue
+		}
+
+		device := fields[2]
+
+		stats := map[string]float64{
+			"reads":     parseFloat(fields[3]),
+			"rsectors":  parseFloat(fields[5]),
+			"writes":    parseFloat(fields[7]),
+			"wsectors":  parseFloat(fields[9]),
+			"in_flight": parseFloat(fields[11]),
+			"io_time":   parseFloat(fields[12]),
+		}
+
+		for name, value := range stats {
+			metricsCollected = append(metricsCollected, MetricSample{
+				Name:      "disk." + device + "." + name,
+				Value:     value,
+				Unit:      "count",
+				Timestamp: timeCollected,
+				Collector: "disk",
+			})
+		}
+	}
+
+	return metricsCollected, nil
+}
+
+func parseFloat(s string) float64 {
+	v, _ := strconv.ParseFloat(s, 64)
+	return v
+}
+
 func main() {
 	meminfoPath := os.Getenv("MEMINFO_PATH")
 	if meminfoPath == "" {
 		meminfoPath = "meminfo.txt"
+	}
+
+	diskInfoPath := os.Getenv("DISKINFO_PATH")
+	if diskInfoPath == "" {
+		diskInfoPath = "diskstats.txt"
 	}
 
 	// we should have a way to gather all collectors and then run a common method,
@@ -113,8 +170,15 @@ func main() {
 
 	go func() {
 		for metric := range incomingSamplesChannel {
-			if metric.Name == "memory.used_percent" && metric.Value > 10 {
+			fmt.Printf("  metric: %s = %.2f %s\n", metric.Name, metric.Value, metric.Unit)
+			if metric.Name == "memory.used_percent" && metric.Value > 5 {
 				fmt.Println("Memory usage is high")
+			}
+			if strings.HasPrefix(metric.Name, "disk.") &&
+				strings.HasSuffix(metric.Name, ".io_time") &&
+				metric.Value > 1000 {
+				device := strings.TrimSuffix(strings.TrimPrefix(metric.Name, "disk."), ".io_time")
+				fmt.Printf("Disk %s I/O time is too high: %.0f ms\n", device, metric.Value)
 			}
 		}
 	}()
@@ -127,6 +191,16 @@ func main() {
 			continue
 		}
 		for _, d := range data {
+			incomingSamplesChannel <- d
+		}
+
+		fmt.Println("Running disk collection")
+		diskData, err := diskCollector(diskInfoPath)
+		if err != nil {
+			fmt.Printf("Error collecting disk info: %v\n", err)
+			continue
+		}
+		for _, d := range diskData {
 			incomingSamplesChannel <- d
 		}
 	}
