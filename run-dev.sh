@@ -12,7 +12,6 @@ case "${1:-agent}" in
   agent)
     docker run -it --rm \
       -e MEMINFO_PATH=/proc/meminfo \
-      -e DISKINFO_PATH=/proc/diskstats \
       -v "$(pwd)":/app \
       -w /app \
       golang:1.24-bookworm \
