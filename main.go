@@ -109,26 +109,36 @@ func diskCollector(path string) ([]MetricSample, error) {
 	for _, line := range lines {
 		fields := strings.Fields(line)
 
-		if len(fields) < 14 {
+		if len(fields) < 6 {
 			continue
 		}
 
-		device := fields[2]
-
-		stats := map[string]float64{
-			"reads":     parseFloat(fields[3]),
-			"rsectors":  parseFloat(fields[5]),
-			"writes":    parseFloat(fields[7]),
-			"wsectors":  parseFloat(fields[9]),
-			"in_flight": parseFloat(fields[11]),
-			"io_time":   parseFloat(fields[12]),
+		if fields[0] == "Filesystem" {
+			continue
 		}
 
-		for name, value := range stats {
+		mount := fields[5]
+		device := strings.ReplaceAll(strings.TrimPrefix(mount, "/"), "/", "_")
+		if device == "" {
+			device = "root"
+		}
+
+		stats := []struct {
+			name   string
+			value  string
+			unit   string
+			parser func(string) float64
+		}{
+			{"used_percent", strings.TrimSuffix(fields[4], "%"), "", parseFloat},
+			{"used", fields[2], "bytes", parseSize},
+			{"available", fields[3], "bytes", parseSize},
+		}
+
+		for _, s := range stats {
 			metricsCollected = append(metricsCollected, MetricSample{
-				Name:      "disk." + device + "." + name,
-				Value:     value,
-				Unit:      "count",
+				Name:      "disk." + device + "." + s.name,
+				Value:     s.parser(s.value),
+				Unit:      s.unit,
 				Timestamp: timeCollected,
 				Collector: "disk",
 			})
@@ -143,6 +153,26 @@ func parseFloat(s string) float64 {
 	return v
 }
 
+// different units returned from df so I had to parse them
+func parseSize(s string) float64 {
+	if s == "0" {
+		return 0
+	}
+	units := map[byte]float64{
+		'K': 1024,
+		'M': 1024 * 1024,
+		'G': 1024 * 1024 * 1024,
+		'T': 1024 * 1024 * 1024 * 1024,
+	}
+	last := s[len(s)-1]
+	if mult, ok := units[last]; ok {
+		v, _ := strconv.ParseFloat(s[:len(s)-1], 64)
+		return v * mult
+	}
+	v, _ := strconv.ParseFloat(s, 64)
+	return v
+}
+
 func main() {
 	meminfoPath := os.Getenv("MEMINFO_PATH")
 	if meminfoPath == "" {
@@ -151,7 +181,7 @@ func main() {
 
 	diskInfoPath := os.Getenv("DISKINFO_PATH")
 	if diskInfoPath == "" {
-		diskInfoPath = "diskstats.txt"
+		diskInfoPath = "df.txt"
 	}
 
 	// we should have a way to gather all collectors and then run a common method,
@@ -175,10 +205,10 @@ func main() {
 				fmt.Println("Memory usage is high")
 			}
 			if strings.HasPrefix(metric.Name, "disk.") &&
-				strings.HasSuffix(metric.Name, ".io_time") &&
-				metric.Value > 1000 {
-				device := strings.TrimSuffix(strings.TrimPrefix(metric.Name, "disk."), ".io_time")
-				fmt.Printf("Disk %s I/O time is too high: %.0f ms\n", device, metric.Value)
+				strings.HasSuffix(metric.Name, ".used_percent") &&
+				metric.Value > 50 {
+				device := strings.TrimSuffix(strings.TrimPrefix(metric.Name, "disk."), ".used_percent")
+				fmt.Printf("Disk %s usage is too high: %.0f%%\n", device, metric.Value)
 			}
 		}
 	}()
