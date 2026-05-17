@@ -117,11 +117,7 @@ func diskCollector(path string) ([]MetricSample, error) {
 			continue
 		}
 
-		mount := fields[5]
-		device := strings.ReplaceAll(strings.TrimPrefix(mount, "/"), "/", "_")
-		if device == "" {
-			device = "root"
-		}
+		device := fields[0]
 
 		stats := []struct {
 			name   string
