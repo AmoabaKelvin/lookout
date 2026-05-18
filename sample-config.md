@@ -15,7 +15,9 @@ collectors:
   disk:
     enabled: true
     path: /proc/diskstats
-    block: "/dev/sda"
+    mounts:
+     include: ["", ""] #List of mounts points
+     exclude_fs_types: ["tempfs", "overlay"]
 
 alerts:
   - name: high_memory_usage

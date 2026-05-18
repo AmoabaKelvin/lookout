@@ -7,6 +7,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"golang.org/x/sys/unix"
 )
 
 type MetricSample struct {
@@ -93,80 +95,67 @@ func memoryCollector(path string) ([]MetricSample, error) {
 	return metricsCollected, nil
 }
 
-// i think we are going to have to discuss how we will deal with the different
-// types we will have, so keeping it this nested map
-func diskCollector(path string) ([]MetricSample, error) {
+func diskCollector(path string, targetMounts []string) ([]MetricSample, error) {
 	timeCollected := time.Now()
 	var metricsCollected []MetricSample
 
-	data, err := os.ReadFile(path)
+	mountsData, err := os.ReadFile(path)
 	if err != nil {
-		return nil, errors.New("There was an issue reading the file")
+		return nil, fmt.Errorf("failed to read %s: %w", path, err)
 	}
 
-	lines := strings.Split(strings.TrimSpace(string(data)), "\n")
+	targetSet := make(map[string]bool, len(targetMounts))
+	for _, m := range targetMounts {
+		targetSet[m] = true
+	}
 
+	lines := strings.Split(strings.TrimSpace(string(mountsData)), "\n")
 	for _, line := range lines {
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
 		fields := strings.Fields(line)
+		if len(fields) < 2 {
+			continue
+		}
+		mountPoint := fields[1]
 
-		if len(fields) < 6 {
+		if len(targetMounts) > 0 && !targetSet[mountPoint] {
 			continue
 		}
 
-		if fields[0] == "Filesystem" {
+		var stat unix.Statfs_t
+		if err := unix.Statfs(mountPoint, &stat); err != nil {
 			continue
 		}
 
-		device := fields[0]
-
-		stats := []struct {
-			name   string
-			value  string
-			unit   string
-			parser func(string) float64
-		}{
-			{"used_percent", strings.TrimSuffix(fields[4], "%"), "", parseFloat},
-			{"used", fields[2], "bytes", parseSize},
-			{"available", fields[3], "bytes", parseSize},
+		if stat.Bsize <= 0 || stat.Blocks == 0 {
+			continue
 		}
 
-		for _, s := range stats {
-			metricsCollected = append(metricsCollected, MetricSample{
-				Name:      "disk." + device + "." + s.name,
-				Value:     s.parser(s.value),
-				Unit:      s.unit,
-				Timestamp: timeCollected,
-				Collector: "disk",
-			})
-		}
+		blockSize := uint64(stat.Bsize)
+		total := stat.Blocks * blockSize
+		free := stat.Bfree * blockSize
+		used := total - free
+		usedPercent := (float64(used) / float64(stat.Blocks)) * 100
+
+		name := mountPointToName(mountPoint)
+		metricsCollected = append(metricsCollected,
+			MetricSample{Name: "disk." + name + ".total", Value: float64(total), Unit: "bytes", Timestamp: timeCollected, Collector: "disk"},
+			MetricSample{Name: "disk." + name + ".used", Value: float64(used), Unit: "bytes", Timestamp: timeCollected, Collector: "disk"},
+			MetricSample{Name: "disk." + name + ".free", Value: float64(free), Unit: "bytes", Timestamp: timeCollected, Collector: "disk"},
+			MetricSample{Name: "disk." + name + ".used_percent", Value: usedPercent, Unit: "percent", Timestamp: timeCollected, Collector: "disk"},
+		)
 	}
 
 	return metricsCollected, nil
 }
 
-func parseFloat(s string) float64 {
-	v, _ := strconv.ParseFloat(s, 64)
-	return v
-}
-
-// different units returned from df so I had to parse them
-func parseSize(s string) float64 {
-	if s == "0" {
-		return 0
+func mountPointToName(mp string) string {
+	if mp == "/" {
+		return "root"
 	}
-	units := map[byte]float64{
-		'K': 1024,
-		'M': 1024 * 1024,
-		'G': 1024 * 1024 * 1024,
-		'T': 1024 * 1024 * 1024 * 1024,
-	}
-	last := s[len(s)-1]
-	if mult, ok := units[last]; ok {
-		v, _ := strconv.ParseFloat(s[:len(s)-1], 64)
-		return v * mult
-	}
-	v, _ := strconv.ParseFloat(s, 64)
-	return v
+	return strings.ReplaceAll(strings.TrimPrefix(mp, "/"), "/", "_")
 }
 
 func main() {
@@ -177,8 +166,10 @@ func main() {
 
 	diskInfoPath := os.Getenv("DISKINFO_PATH")
 	if diskInfoPath == "" {
-		diskInfoPath = "df.txt"
+		diskInfoPath = "mounts.txt"
 	}
+
+	targetMounts := []string{"/", "/home", "/var", "/boot"}
 
 	// we should have a way to gather all collectors and then run a common method,
 	// eg, collect on them all (common Collector interface). and they will run
@@ -221,7 +212,7 @@ func main() {
 		}
 
 		fmt.Println("Running disk collection")
-		diskData, err := diskCollector(diskInfoPath)
+		diskData, err := diskCollector(diskInfoPath, targetMounts)
 		if err != nil {
 			fmt.Printf("Error collecting disk info: %v\n", err)
 			continue
