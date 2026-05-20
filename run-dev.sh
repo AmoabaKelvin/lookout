@@ -10,11 +10,14 @@ set -eu
 
 case "${1:-agent}" in
   agent)
+    docker run -d --name lookout-app nginx 2>/dev/null || true
     docker run -it --rm \
       -e MEMINFO_PATH=/proc/meminfo \
+      -e DISKINFO_PATH=/proc/mounts \
       -v "$(pwd)":/app \
+      -v /var/run/docker.sock:/var/run/docker.sock \
       -w /app \
-      golang:1.24-bookworm \
+      golang:1.25-bookworm \
       sh -c 'go run main.go'
     ;;
 
