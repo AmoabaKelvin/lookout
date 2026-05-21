@@ -9,7 +9,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/moby/moby/api/types/events"
 	"github.com/moby/moby/client"
 	"golang.org/x/sys/unix"
 )
@@ -102,46 +101,12 @@ func dockerCollector(cli *client.Client, ctx context.Context) {
 	f := make(client.Filters).Add("type", "container")
 	fmt.Println("Listening to Docker container events...")
 
-	for {
-		result := cli.Events(ctx, client.EventsListOptions{Filters: f})
-		done := false
-		for !done {
-			select {
-			case <-ctx.Done():
-				return
-			// where messages are handled
-			case event, ok := <-result.Messages:
-				if !ok {
-					done = true
-				} else {
-					name := event.Actor.Attributes["name"]
-					timestamp := time.Unix(event.Time, 0).Format("15:04:05")
-					fmt.Printf("[docker] [%s] %s → %s (ID: %.12s)\n",
-						timestamp, event.Action, name, event.Actor.ID,
-					)
-					switch event.Action {
-					case events.ActionDie:
-						if exitCode := event.Actor.Attributes["exitCode"]; exitCode != "" {
-							fmt.Printf("  └─ Exit Code: %s\n", exitCode)
-						}
-					case events.ActionOOM:
-						fmt.Println("  ALERT: Container was OOM killed!")
-					case events.ActionRestart:
-						fmt.Println("  Container restarting (per restart policy)")
-					}
-				}
-			case err, ok := <-result.Err:
-				if !ok || err == nil {
-					done = true
-				} else {
-					fmt.Printf("[docker] Event stream error: %v\n", err)
-					done = true
-				}
-			}
+	for ctx.Err() == nil {
+		err := listenDockerEvents(cli, ctx, f)
+		if err != nil && !errors.Is(err, context.Canceled) {
+			fmt.Printf("[docker] event stream error: %v\n", err)
 		}
-		if ctx.Err() != nil {
-			return
-		}
+
 		time.Sleep(2 * time.Second)
 	}
 }
