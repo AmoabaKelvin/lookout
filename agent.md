@@ -17,3 +17,7 @@ Evaluator is the component that reads the incoming samples from the collectors a
 
 ## Alert Manager
 Alert Manager is the component that receives alerts from the evaluator and then handles them. It is responsible for sending out notifications to the appropriate channels (email, slack, etc.) and making sure we don't oversend or have any issues that occur during the notification process
+
+## Testing the docker container listener
+after starting the application with `sh run-dev.sh`, you should open another terminal and start a random container, nginx for
+example. `docker run -d --name probe nginx` then restart it. `docker restart probe`, then kill it. `docker kill probe`. These should all show as events in the collector.

@@ -18,14 +18,14 @@ case "${1:-agent}" in
       -v /var/run/docker.sock:/var/run/docker.sock \
       -w /app \
       golang:1.25-bookworm \
-      sh -c 'go run main.go'
+      sh -c 'go run .'
     ;;
 
   shell)
     docker run -it --rm \
       -v "$(pwd)":/app \
       -w /app \
-      golang:1.24-bookworm \
+      golang:1.25-bookworm \
       bash
     ;;
 
