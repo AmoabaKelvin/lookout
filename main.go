@@ -21,6 +21,13 @@ type MetricSample struct {
 	Collector string
 }
 
+type DockerEvent struct {
+	ID         string
+	Timestamp  time.Time
+	Action     string
+	Attributes map[string]string // this will have info about say the image, exit code
+}
+
 // type Collector interface {
 // 	Collect(ctx context.Context) ([]MetricSample, error)
 // }
@@ -97,12 +104,12 @@ func memoryCollector(path string) ([]MetricSample, error) {
 	return metricsCollected, nil
 }
 
-func dockerCollector(cli *client.Client, ctx context.Context) {
+func dockerCollector(cli *client.Client, ctx context.Context, dockerEventsChannel chan<- DockerEvent) {
 	f := make(client.Filters).Add("type", "container")
 	fmt.Println("Listening to Docker container events...")
 
 	for ctx.Err() == nil {
-		err := listenDockerEvents(cli, ctx, f)
+		err := listenDockerEvents(cli, ctx, f, dockerEventsChannel)
 		if err != nil && !errors.Is(err, context.Canceled) {
 			fmt.Printf("[docker] event stream error: %v\n", err)
 		}
@@ -201,29 +208,48 @@ func main() {
 
 	targetMounts := []string{"/", "/home", "/var", "/boot"}
 
-	ticker := time.NewTicker(5 * time.Second)
-	defer ticker.Stop()
-
 	incomingSamplesChannel := make(chan MetricSample, 100)
+	dockerEventsChannel := make(chan DockerEvent, 100)
 
+	// this is the evaluator that will be receiving events and processing them
+	// this is going to be stateful because some things need state in order
+	// for us to make good decisions. example. we need to keep track of the
+	// docker events and debounce them before we send stuff out to the alert manager
+	// we don't just fan things out
 	go func() {
-		for metric := range incomingSamplesChannel {
-			fmt.Printf("  metric: %s = %.2f %s\n", metric.Name, metric.Value, metric.Unit)
-			if metric.Name == "memory.used_percent" && metric.Value > 5 {
-				fmt.Println("Memory usage is high")
-			}
-			if strings.HasPrefix(metric.Name, "disk.") &&
-				strings.HasSuffix(metric.Name, ".used_percent") &&
-				metric.Value > 50 {
-				device := strings.TrimSuffix(strings.TrimPrefix(metric.Name, "disk."), ".used_percent")
-				fmt.Printf("Disk %s usage is too high: %.0f%%\n", device, metric.Value)
+		for {
+			select {
+			case metric, ok := <-incomingSamplesChannel:
+				if !ok {
+					return
+				}
+				fmt.Printf("  metric: %s = %.2f %s\n", metric.Name, metric.Value, metric.Unit)
+				if metric.Name == "memory.used_percent" && metric.Value > 5 {
+					fmt.Println("Memory usage is high")
+				}
+				if strings.HasPrefix(metric.Name, "disk.") &&
+					strings.HasSuffix(metric.Name, ".used_percent") &&
+					metric.Value > 50 {
+					device := strings.TrimSuffix(strings.TrimPrefix(metric.Name, "disk."), ".used_percent")
+					fmt.Printf("Disk %s usage is too high: %.0f%%\n", device, metric.Value)
+				}
+
+			case dockerEvent, ok := <-dockerEventsChannel:
+				if !ok {
+					return
+				}
+				fmt.Printf("  docker event: %s\n", dockerEvent.Action)
+				fmt.Printf("  docker event attributes: %v\n", dockerEvent)
 			}
 		}
 	}()
 
 	fmt.Println("Starting monitor (Ctrl+C to stop)")
 
-	go dockerCollector(cli, ctx)
+	go dockerCollector(cli, ctx, dockerEventsChannel)
+
+	ticker := time.NewTicker(5 * time.Second)
+	defer ticker.Stop()
 
 	for range ticker.C {
 		fmt.Println("Running memory collection")

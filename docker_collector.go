@@ -10,7 +10,7 @@ import (
 	"github.com/moby/moby/client"
 )
 
-func listenDockerEvents(cli *client.Client, ctx context.Context, f client.Filters) error {
+func listenDockerEvents(cli *client.Client, ctx context.Context, f client.Filters, dockerEventsChannel chan<- DockerEvent) error {
 	result := cli.Events(ctx, client.EventsListOptions{Filters: f})
 
 	for {
@@ -29,13 +29,19 @@ func listenDockerEvents(cli *client.Client, ctx context.Context, f client.Filter
 
 			switch event.Action {
 			case events.ActionDie:
-				if exitCode := event.Actor.Attributes["exitCode"]; exitCode != "" {
-					fmt.Printf("[docker] [%s] %s (Killed with exit code %s)\n", timestamp, name, exitCode)
-				} else {
-					fmt.Printf("[docker] [%s] %s (Killed)\n", timestamp, name)
+				dockerEventsChannel <- DockerEvent{
+					ID:         event.Actor.ID,
+					Timestamp:  time.Unix(event.Time, 0),
+					Action:     string(events.ActionDie),
+					Attributes: event.Actor.Attributes,
 				}
 			case events.ActionRestart:
-				fmt.Printf("[docker] [%s] %s (Restarted)\n", timestamp, name)
+				dockerEventsChannel <- DockerEvent{
+					ID:         event.Actor.ID,
+					Timestamp:  time.Unix(event.Time, 0),
+					Action:     string(events.ActionRestart),
+					Attributes: event.Actor.Attributes,
+				}
 			}
 
 		case err, ok := <-result.Err:
