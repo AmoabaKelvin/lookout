@@ -107,6 +107,10 @@ func dockerCollector(cli *client.Client, ctx context.Context) {
 			fmt.Printf("[docker] event stream error: %v\n", err)
 		}
 
+		// we are listening to the events from the docker daemon, the reason we are
+		// sleeping here is so if there's any issue with the daemon, we try again
+		// after some time in order to resume listening to the events
+		// we will be looking at a better way to do this though.
 		time.Sleep(2 * time.Second)
 	}
 }
