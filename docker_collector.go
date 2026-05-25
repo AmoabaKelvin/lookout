@@ -28,18 +28,11 @@ func listenDockerEvents(cli *client.Client, ctx context.Context, f client.Filter
 			fmt.Printf("[docker] [%s] %s\n", timestamp, name)
 
 			switch event.Action {
-			case events.ActionDie:
+			case events.ActionDie, events.ActionOOM, events.ActionRestart, events.ActionStart, events.ActionStop:
 				dockerEventsChannel <- DockerEvent{
 					ID:         event.Actor.ID,
 					Timestamp:  time.Unix(event.Time, 0),
-					Action:     string(events.ActionDie),
-					Attributes: event.Actor.Attributes,
-				}
-			case events.ActionRestart:
-				dockerEventsChannel <- DockerEvent{
-					ID:         event.Actor.ID,
-					Timestamp:  time.Unix(event.Time, 0),
-					Action:     string(events.ActionRestart),
+					Action:     string(event.Action),
 					Attributes: event.Actor.Attributes,
 				}
 			}
