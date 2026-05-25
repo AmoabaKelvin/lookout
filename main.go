@@ -118,6 +118,9 @@ func dockerCollector(cli *client.Client, ctx context.Context, dockerEventsChanne
 		// sleeping here is so if there's any issue with the daemon, we try again
 		// after some time in order to resume listening to the events
 		// we will be looking at a better way to do this though.
+		// issue here is after sleeping for 2 seconds, assuming there were events
+		// that happened during that time, we will miss them all. so we need to always
+		// start checking / listening to events for every 2 seconds before.
 		time.Sleep(2 * time.Second)
 	}
 }
@@ -237,6 +240,9 @@ func main() {
 			case dockerEvent, ok := <-dockerEventsChannel:
 				if !ok {
 					return
+				}
+				if dockerEvent.Action == "oom" {
+					fmt.Printf("An OOM event occurred for container, %s", dockerEvent.ID)
 				}
 				fmt.Printf("  docker event: %s\n", dockerEvent.Action)
 				fmt.Printf("  docker event attributes: %v\n", dockerEvent)
