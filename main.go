@@ -189,6 +189,30 @@ func mountPointToName(mp string) string {
 	return strings.ReplaceAll(strings.TrimPrefix(mp, "/"), "/", "_")
 }
 
+type State string
+
+const (
+	Running State = "running"
+	Exited  State = "stopped"
+	Paused  State = "paused"
+	Created State = "created"
+	Removed State = "removed"
+)
+
+type ContainerState struct {
+	ID         string
+	Name       string
+	Image      string
+	State      State
+	LastOOMAt  time.Time
+	LastExit   int
+	LastStopAt time.Time
+	LastDieAt  time.Time
+	PendingDie bool
+	StartedAt  time.Time
+	DieTimes   []time.Time
+}
+
 func main() {
 	ctx := context.Background()
 
@@ -213,6 +237,28 @@ func main() {
 
 	incomingSamplesChannel := make(chan MetricSample, 100)
 	dockerEventsChannel := make(chan DockerEvent, 100)
+	dockerEventsEvaluationChannel := make(chan string, 100)
+	containers := make(map[string]*ContainerState)
+
+	evaluateContainer := func(c *ContainerState) {
+		if c.PendingDie {
+			if !c.LastOOMAt.IsZero() {
+				// died with an OOM
+				fmt.Printf("the container %s died with an OOM, immediate alert", c.ID)
+			} else if !c.LastStopAt.IsZero() && c.LastExit != 0 {
+				fmt.Printf("the container %s did not die cleanly", c.ID)
+			}
+
+			if c.LastExit != 0 {
+				// the container did not die cleanly
+				fmt.Printf("The container did not die cleanly")
+			}
+		}
+
+		c.PendingDie = false
+		c.LastOOMAt = time.Time{}
+		c.LastStopAt = time.Time{}
+	}
 
 	// this is the evaluator that will be receiving events and processing them
 	// this is going to be stateful because some things need state in order
@@ -241,11 +287,65 @@ func main() {
 				if !ok {
 					return
 				}
-				if dockerEvent.Action == "oom" {
-					fmt.Printf("An OOM event occurred for container, %s", dockerEvent.ID)
+
+				container := containers[dockerEvent.ID]
+				if container == nil {
+					container = &ContainerState{
+						ID: dockerEvent.ID,
+					}
+					containers[dockerEvent.ID] = container
 				}
-				fmt.Printf("  docker event: %s\n", dockerEvent.Action)
-				fmt.Printf("  docker event attributes: %v\n", dockerEvent)
+
+				if name := dockerEvent.Attributes["name"]; name != "" {
+					container.Name = name
+				}
+				if image := dockerEvent.Attributes["image"]; image != "" {
+					container.Image = image
+				}
+
+				switch dockerEvent.Action {
+				case "start", "restart":
+					container.State = Running
+					container.StartedAt = dockerEvent.Timestamp
+					// container.HasOOM, container.HasStopped, container.PendingDie = false, false, false
+					// evaluateContainer(container)
+
+					if container.PendingDie && container.LastDieAt.Before(container.StartedAt) {
+						// we should mark as resolved
+						container.PendingDie = false
+						// TODO: evaluate the restart loop here
+					}
+				case "die":
+					container.State = Exited
+					if code, err := strconv.Atoi(dockerEvent.Attributes["exitCode"]); err == nil {
+						container.LastExit = code
+					}
+					container.LastDieAt = dockerEvent.Timestamp
+					container.DieTimes = append(container.DieTimes, dockerEvent.Timestamp)
+					container.PendingDie = true
+
+					// a way to trigger an evaluation after X seconds after the die has happened
+					id := dockerEvent.ID
+					time.AfterFunc(1500*time.Millisecond, func() {
+						dockerEventsEvaluationChannel <- id
+					})
+				case "stop":
+					container.LastStopAt = dockerEvent.Timestamp
+				case "oom":
+					container.LastOOMAt = dockerEvent.Timestamp
+					// FIX: we will have the correct alerts for this later
+					fmt.Printf("The container %s was killed because of an OOM", container.ID)
+				}
+
+			case pendingContainerToEvaluate, ok := <-dockerEventsEvaluationChannel:
+				if !ok {
+					continue
+				}
+				container := containers[pendingContainerToEvaluate]
+				if container == nil {
+					continue
+				}
+				evaluateContainer(container)
 			}
 		}
 	}()
