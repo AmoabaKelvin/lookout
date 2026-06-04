@@ -15,6 +15,9 @@ import (
 	"golang.org/x/sys/unix"
 )
 
+// version is set at build time via -ldflags "-X main.version=...".
+var version = "dev"
+
 type MetricSample struct {
 	Name      string
 	Value     float64
@@ -374,7 +377,7 @@ func main() {
 		}
 	}()
 
-	fmt.Println("Starting monitor (Ctrl+C to stop)")
+	fmt.Printf("Starting lookout %s on %s (Ctrl+C to stop)\n", version, cfg.Hostname)
 
 	if cfg.DockerEnabled {
 		go dockerCollector(cli, ctx, dockerEventsChannel)
