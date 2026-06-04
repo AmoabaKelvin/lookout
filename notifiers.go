@@ -61,10 +61,12 @@ type DiscordNotifier struct {
 	WebhookURL string
 }
 
+// Discord incoming webhooks expect a JSON body with a "content" field.
 func (d *DiscordNotifier) Send(alert Alert) error {
 	return postJSON(d.WebhookURL, map[string]string{"content": formatAlert(alert)})
 }
 
+// Google Chat incoming webhooks expect a JSON body with a "text" field.
 func (g *GoogleChatNotifier) Send(alert Alert) error {
 	return postJSON(g.WebhookURL, map[string]string{"text": formatAlert(alert)})
 }
