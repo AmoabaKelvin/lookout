@@ -109,27 +109,6 @@ func memoryCollector(path string) ([]MetricSample, error) {
 	return metricsCollected, nil
 }
 
-func dockerCollector(cli *client.Client, ctx context.Context, dockerEventsChannel chan<- DockerEvent) {
-	f := make(client.Filters).Add("type", "container")
-	fmt.Println("Listening to Docker container events...")
-
-	for ctx.Err() == nil {
-		err := listenDockerEvents(cli, ctx, f, dockerEventsChannel)
-		if err != nil && !errors.Is(err, context.Canceled) {
-			fmt.Printf("[docker] event stream error: %v\n", err)
-		}
-
-		// we are listening to the events from the docker daemon, the reason we are
-		// sleeping here is so if there's any issue with the daemon, we try again
-		// after some time in order to resume listening to the events
-		// we will be looking at a better way to do this though.
-		// issue here is after sleeping for 2 seconds, assuming there were events
-		// that happened during that time, we will miss them all. so we need to always
-		// start checking / listening to events for every 2 seconds before.
-		time.Sleep(2 * time.Second)
-	}
-}
-
 func diskCollector(path string, targetMounts []string) ([]MetricSample, error) {
 	timeCollected := time.Now()
 	var metricsCollected []MetricSample
