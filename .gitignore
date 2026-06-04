@@ -1,2 +1,9 @@
 # built binary
 /lookout
+
+# build artifacts
+/dist/
+
+# real config with secrets (never commit)
+*.env
+/etc/
