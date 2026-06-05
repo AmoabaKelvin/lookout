@@ -270,6 +270,28 @@ func main() {
 		defer cli.Close()
 	}
 
+	if cfg.HeartbeatURL != "" {
+		go func() {
+			if err := PingRemote(cfg.HeartbeatURL); err != nil {
+				fmt.Printf("Initial heartbeat failed: %v\n", err)
+			}
+
+			ticker := time.NewTicker(cfg.HeartbeatInterval)
+			defer ticker.Stop()
+
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case <-ticker.C:
+					if err := PingRemote(cfg.HeartbeatURL); err != nil {
+						fmt.Printf("Heartbeat failed: %v\n", err)
+					}
+				}
+			}
+		}()
+	}
+
 	incomingSamplesChannel := make(chan MetricSample, 100)
 	dockerEventsChannel := make(chan DockerEvent, 100)
 	dockerEventsEvaluationChannel := make(chan string, 100)
