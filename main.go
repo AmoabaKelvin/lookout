@@ -2,244 +2,64 @@ package main
 
 import (
 	"context"
-	"errors"
+	"flag"
 	"fmt"
+	"log"
 	"os"
 	"os/signal"
-	"strconv"
 	"strings"
 	"syscall"
 	"time"
 
 	"github.com/moby/moby/client"
-	"golang.org/x/sys/unix"
 )
 
 // version is set at build time via -ldflags "-X main.version=...".
 var version = "dev"
 
-type MetricSample struct {
-	Name      string
-	Value     float64
-	Unit      string
-	Timestamp time.Time
-	Collector string
-}
-
-type DockerEvent struct {
-	ID         string
-	Timestamp  time.Time
-	Action     string
-	Attributes map[string]string // this will have info about say the image, exit code
-}
-
-// type Collector interface {
-// 	Collect(ctx context.Context) ([]MetricSample, error)
-// }
-
-func memoryCollector(path string) ([]MetricSample, error) {
-	memInfo := make(map[string]float64)
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return []MetricSample{}, errors.New("There was an issue reading the /proc/memory file")
-	}
-
-	// proc/memory has key value pairs, separated by : and the values have KB
-	parts := strings.SplitSeq(string(data), "\n")
-	// convert the data into a map of key value pairs and then we read each of those key value stuff
-	for part := range parts {
-		if part == "" {
-			continue
-		}
-		keyValueSplit := strings.SplitN(part, ":", 2)
-
-		if len(keyValueSplit) != 2 {
-			continue
-		}
-
-		key := strings.TrimSpace(keyValueSplit[0])
-		value, err := strconv.Atoi(
-			strings.TrimSpace(strings.Split(strings.TrimSpace(keyValueSplit[1]), " ")[0]),
-		)
-		if err != nil {
-			fmt.Println("Something went wrong")
-		}
-
-		memInfo[key] = float64(value)
-
-	}
-
-	timeCollected := time.Now()
-	memUsed := memInfo["MemTotal"] - memInfo["MemAvailable"]
-
-	var metricsCollected []MetricSample
-
-	metricsCollected = append(metricsCollected, MetricSample{
-		Name:      "memory.total",
-		Value:     memInfo["MemTotal"],
-		Unit:      "kB",
-		Timestamp: timeCollected,
-		Collector: "memory",
-	})
-
-	metricsCollected = append(metricsCollected, MetricSample{
-		Name:      "memory.used_percent",
-		Value:     (memUsed / memInfo["MemTotal"]) * 100,
-		Unit:      "percent",
-		Timestamp: timeCollected,
-		Collector: "memory",
-	})
-
-	metricsCollected = append(metricsCollected, MetricSample{
-		Name:      "memory.available",
-		Value:     memInfo["MemAvailable"],
-		Unit:      "kB",
-		Timestamp: timeCollected,
-		Collector: "memory",
-	})
-
-	metricsCollected = append(metricsCollected, MetricSample{
-		Name:      "memory.used",
-		Value:     memUsed,
-		Unit:      "kB",
-		Timestamp: timeCollected,
-		Collector: "memory",
-	})
-
-	return metricsCollected, nil
-}
-
-func diskCollector(path string, targetMounts []string) ([]MetricSample, error) {
-	timeCollected := time.Now()
-	var metricsCollected []MetricSample
-
-	mountsData, err := os.ReadFile(path)
-	if err != nil {
-		return nil, fmt.Errorf("failed to read %s: %w", path, err)
-	}
-
-	//bool is bigger than empty struct
-	targetSet := make(map[string]bool, len(targetMounts))
-	for _, m := range targetMounts {
-		targetSet[m] = true
-	}
-
-	lines := strings.Split(strings.TrimSpace(string(mountsData)), "\n")
-	for _, line := range lines {
-		if line == "" || strings.HasPrefix(line, "#") {
-			continue
-		}
-		fields := strings.Fields(line)
-		if len(fields) < 2 {
-			continue
-		}
-		mountPoint := fields[1]
-
-		if len(targetMounts) > 0 && !targetSet[mountPoint] {
-			continue
-		}
-
-		var stat unix.Statfs_t
-		if err := unix.Statfs(mountPoint, &stat); err != nil {
-			continue
-		}
-
-		if stat.Bsize <= 0 || stat.Blocks == 0 {
-			continue
-		}
-
-		blockSize := uint64(stat.Bsize)
-		total := stat.Blocks * blockSize
-		free := stat.Bfree * blockSize
-		used := total - free
-		usedPercent := (float64(used) / float64(total)) * 100
-
-		name := mountPointToName(mountPoint)
-		metricsCollected = append(metricsCollected,
-			MetricSample{Name: "disk." + name + ".total", Value: float64(total), Unit: "bytes", Timestamp: timeCollected, Collector: "disk"},
-			MetricSample{Name: "disk." + name + ".used", Value: float64(used), Unit: "bytes", Timestamp: timeCollected, Collector: "disk"},
-			MetricSample{Name: "disk." + name + ".free", Value: float64(free), Unit: "bytes", Timestamp: timeCollected, Collector: "disk"},
-			MetricSample{Name: "disk." + name + ".used_percent", Value: usedPercent, Unit: "percent", Timestamp: timeCollected, Collector: "disk"},
-		)
-	}
-
-	return metricsCollected, nil
-}
-
-func mountPointToName(mp string) string {
-	if mp == "/" {
-		return "root"
-	}
-	return strings.ReplaceAll(strings.TrimPrefix(mp, "/"), "/", "_")
-}
-
-type State string
-
-const (
-	Running State = "running"
-	Exited  State = "stopped"
-	Paused  State = "paused"
-	Created State = "created"
-	Removed State = "removed"
-)
-
-type ContainerState struct {
-	ID         string
-	Name       string
-	Image      string
-	State      State
-	LastOOMAt  time.Time
-	LastExit   int
-	LastStopAt time.Time
-	LastDieAt  time.Time
-	PendingDie bool
-	StartedAt  time.Time
-	DieTimes   []time.Time
-}
-
 func main() {
-	cfg := LoadConfig()
+	configPath := flag.String("config", defaultConfigPath, "path to the config file")
+	flag.Parse()
 
-	// Cancel the context on SIGINT/SIGTERM so the agent shuts down cleanly
-	// (important when running under systemd, which stops services with SIGTERM).
+	cfg, err := LoadConfig(*configPath)
+	if err != nil {
+		log.Fatalf("config: %v", err)
+	}
+
+	// shut down cleanly on SIGINT/SIGTERM (systemd stops the service with SIGTERM)
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	// Pick notifiers based on which webhook URLs are configured. With none set,
-	// fall back to the console so the agent is still useful with zero config.
-	var notifiers []Notifier
-	if cfg.GoogleChatWebhookURL != "" {
-		notifiers = append(notifiers, &GoogleChatNotifier{WebhookURL: cfg.GoogleChatWebhookURL})
-	}
-	if cfg.DiscordWebhookURL != "" {
-		notifiers = append(notifiers, &DiscordNotifier{WebhookURL: cfg.DiscordWebhookURL})
-	}
+	notifiers := buildNotifiers(cfg.Notifiers)
 	if len(notifiers) == 0 {
 		notifiers = append(notifiers, &ConsoleNotifier{})
-		fmt.Println("No webhook configured; alerts will print to the console")
+		fmt.Println("No notifier configured; alerts will print to the console")
 	}
 
-	// Threshold rules. The user-facing config (thresholds) is translated into
-	// these internal rules once, at startup.
 	rules := []Rule{
 		{
+			ID:        "memory",
 			Matcher:   func(s MetricSample) bool { return s.Name == "memory.used_percent" },
-			Threshold: cfg.MemThreshold,
+			Threshold: cfg.Alerts.Memory.Threshold,
 			Message:   "High memory usage",
+			Severity:  cfg.Alerts.Memory.Severity,
+			For:       cfg.Alerts.Memory.For.Std(),
 		},
 		{
+			ID:        "disk",
 			Matcher:   func(s MetricSample) bool { return s.Collector == "disk" && strings.HasSuffix(s.Name, ".used_percent") },
-			Threshold: cfg.DiskThreshold,
+			Threshold: cfg.Alerts.Disk.Threshold,
 			Message:   "High disk usage",
+			Severity:  cfg.Alerts.Disk.Severity,
+			For:       cfg.Alerts.Disk.For.Std(),
 		},
 	}
 
-	alertManager := NewAlertManager(rules, cfg.RenotifyAfter, cfg.Hostname, notifiers)
+	alertManager := NewAlertManager(rules, cfg.Alerts.RenotifyAfter.Std(), cfg.Hostname, notifiers)
 
-	// Docker is optional and off by default. Only create the client (a hard
-	// dependency that would otherwise fail startup) when explicitly enabled.
+	// only build the docker client when enabled; client.New would otherwise fail startup
 	var cli *client.Client
-	if cfg.DockerEnabled {
+	if cfg.Docker.Enabled {
 		var err error
 		cli, err = client.New(client.FromEnv)
 		if err != nil {
@@ -249,36 +69,34 @@ func main() {
 		defer cli.Close()
 	}
 
+	if cfg.Heartbeat.URL != "" {
+		go func() {
+			if err := PingRemote(cfg.Heartbeat.URL); err != nil {
+				fmt.Printf("Initial heartbeat failed: %v\n", err)
+			}
+
+			ticker := time.NewTicker(cfg.Heartbeat.Interval.Std())
+			defer ticker.Stop()
+
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case <-ticker.C:
+					if err := PingRemote(cfg.Heartbeat.URL); err != nil {
+						fmt.Printf("Heartbeat failed: %v\n", err)
+					}
+				}
+			}
+		}()
+	}
+
 	incomingSamplesChannel := make(chan MetricSample, 100)
 	dockerEventsChannel := make(chan DockerEvent, 100)
 	dockerEventsEvaluationChannel := make(chan string, 100)
 	containers := make(map[string]*ContainerState)
 
-	evaluateContainer := func(c *ContainerState) {
-		if c.PendingDie {
-			if !c.LastOOMAt.IsZero() {
-				// died with an OOM
-				fmt.Printf("the container %s died with an OOM, immediate alert", c.ID)
-			} else if !c.LastStopAt.IsZero() && c.LastExit != 0 {
-				fmt.Printf("the container %s did not die cleanly", c.ID)
-			}
-
-			if c.LastExit != 0 {
-				// the container did not die cleanly
-				fmt.Printf("The container did not die cleanly")
-			}
-		}
-
-		c.PendingDie = false
-		c.LastOOMAt = time.Time{}
-		c.LastStopAt = time.Time{}
-	}
-
-	// this is the evaluator that will be receiving events and processing them
-	// this is going to be stateful because some things need state in order
-	// for us to make good decisions. example. we need to keep track of the
-	// docker events and debounce them before we send stuff out to the alert manager
-	// we don't just fan things out
+	// single evaluator goroutine owns the alert + container state, so no mutex is needed
 	go func() {
 		for {
 			select {
@@ -293,77 +111,27 @@ func main() {
 				if !ok {
 					return
 				}
-
-				container := containers[dockerEvent.ID]
-				if container == nil {
-					container = &ContainerState{
-						ID: dockerEvent.ID,
-					}
-					containers[dockerEvent.ID] = container
-				}
-
-				if name := dockerEvent.Attributes["name"]; name != "" {
-					container.Name = name
-				}
-				if image := dockerEvent.Attributes["image"]; image != "" {
-					container.Image = image
-				}
-
-				switch dockerEvent.Action {
-				case "start", "restart":
-					container.State = Running
-					container.StartedAt = dockerEvent.Timestamp
-					// container.HasOOM, container.HasStopped, container.PendingDie = false, false, false
-					// evaluateContainer(container)
-
-					if container.PendingDie && container.LastDieAt.Before(container.StartedAt) {
-						// we should mark as resolved
-						container.PendingDie = false
-						// TODO: evaluate the restart loop here
-					}
-				case "die":
-					container.State = Exited
-					if code, err := strconv.Atoi(dockerEvent.Attributes["exitCode"]); err == nil {
-						container.LastExit = code
-					}
-					container.LastDieAt = dockerEvent.Timestamp
-					container.DieTimes = append(container.DieTimes, dockerEvent.Timestamp)
-					container.PendingDie = true
-
-					// a way to trigger an evaluation after X seconds after the die has happened
-					id := dockerEvent.ID
-					time.AfterFunc(1500*time.Millisecond, func() {
-						dockerEventsEvaluationChannel <- id
-					})
-				case "stop":
-					container.LastStopAt = dockerEvent.Timestamp
-				case "oom":
-					container.LastOOMAt = dockerEvent.Timestamp
-					// FIX: we will have the correct alerts for this later
-					fmt.Printf("The container %s was killed because of an OOM", container.ID)
-				}
+				handleDockerEvent(containers, dockerEvent, dockerEventsEvaluationChannel)
 
 			case pendingContainerToEvaluate, ok := <-dockerEventsEvaluationChannel:
 				if !ok {
 					continue
 				}
-				container := containers[pendingContainerToEvaluate]
-				if container == nil {
-					continue
+				if container := containers[pendingContainerToEvaluate]; container != nil {
+					evaluateContainer(container)
 				}
-				evaluateContainer(container)
 			}
 		}
 	}()
 
 	fmt.Printf("Starting lookout %s on %s (Ctrl+C to stop)\n", version, cfg.Hostname)
 
-	if cfg.DockerEnabled {
+	if cfg.Docker.Enabled {
 		go dockerCollector(cli, ctx, dockerEventsChannel)
 	}
 
 	collect := func() {
-		data, err := memoryCollector(cfg.MeminfoPath)
+		data, err := memoryCollector(cfg.Alerts.Memory.Source)
 		if err != nil {
 			fmt.Printf("Error collecting memory info: %v\n", err)
 		} else {
@@ -372,7 +140,7 @@ func main() {
 			}
 		}
 
-		diskData, err := diskCollector(cfg.DiskInfoPath, cfg.TargetMounts)
+		diskData, err := diskCollector(cfg.Alerts.Disk.Source, cfg.Alerts.Disk.Mounts)
 		if err != nil {
 			fmt.Printf("Error collecting disk info: %v\n", err)
 		} else {
@@ -382,7 +150,7 @@ func main() {
 		}
 	}
 
-	ticker := time.NewTicker(cfg.CollectionInterval)
+	ticker := time.NewTicker(cfg.CollectionInterval.Std())
 	defer ticker.Stop()
 
 	collect() // collect once at startup instead of waiting a full interval
@@ -395,4 +163,33 @@ func main() {
 			collect()
 		}
 	}
+}
+
+// buildNotifiers maps the configured notifier sections to live notifiers. A nil
+// section (absent from the config) or one missing its credentials is skipped.
+func buildNotifiers(cfg NotifiersConfig) []Notifier {
+	var notifiers []Notifier
+	if n := cfg.GoogleChat; n != nil && n.WebhookURL != "" {
+		notifiers = append(notifiers, &GoogleChatNotifier{WebhookURL: n.WebhookURL})
+	}
+	if n := cfg.Discord; n != nil && n.WebhookURL != "" {
+		notifiers = append(notifiers, &DiscordNotifier{WebhookURL: n.WebhookURL})
+	}
+	if n := cfg.Slack; n != nil && n.WebhookURL != "" {
+		notifiers = append(notifiers, &SlackNotifier{WebhookURL: n.WebhookURL})
+	}
+	if n := cfg.Webhook; n != nil && n.URL != "" {
+		notifiers = append(notifiers, &GenericWebhookNotifier{WebhookURL: n.URL})
+	}
+	if n := cfg.Telegram; n != nil && n.BotToken != "" && n.ChatID != "" {
+		notifiers = append(notifiers, &TelegramNotifier{BotToken: n.BotToken, ChatID: n.ChatID})
+	}
+	if n := cfg.Email; n != nil && n.Host != "" && n.From != "" && len(n.To) > 0 {
+		notifiers = append(notifiers, &SMTPNotifier{
+			Host: n.Host, Port: n.Port,
+			Username: n.Username, Password: n.Password,
+			From: n.From, To: n.To,
+		})
+	}
+	return notifiers
 }

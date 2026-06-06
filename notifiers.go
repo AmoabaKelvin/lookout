@@ -4,7 +4,10 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
+	"net/url"
+	"strconv"
 	"time"
 )
 
@@ -14,18 +17,53 @@ type Notifier interface {
 
 var httpClient = &http.Client{Timeout: 10 * time.Second}
 
-func formatAlert(alert Alert) string {
-	status := "🔴 FIRING"
-	if !alert.IsFiring {
-		status = "✅ RESOLVED"
+// safeURL reduces a URL to scheme://host so tokens embedded in the path or query
+// (e.g. a Telegram bot token, a Google Chat key/token) never reach the logs.
+func safeURL(raw string) string {
+	u, err := url.Parse(raw)
+	if err != nil || u.Host == "" {
+		return "<redacted url>"
 	}
-	return fmt.Sprintf("%s — %s\nHost: %s\nMetric: %s\nValue: %s (threshold %s)",
-		status, alert.Title, alert.Hostname, alert.Metric,
+	return u.Scheme + "://" + u.Host
+}
+
+// unwrapURL strips the address from a *url.Error so the underlying cause can be
+// logged without the secret-bearing URL it carries.
+func unwrapURL(err error) error {
+	if ue, ok := err.(*url.Error); ok {
+		return ue.Err
+	}
+	return err
+}
+
+// alertVisual maps an alert's state and severity to the colour/label each
+// channel renders: green when resolved, red (critical) or amber (warning).
+type alertVisual struct {
+	label        string
+	emoji        string
+	hex          string
+	discordColor int
+	slackColor   string
+}
+
+func visualFor(alert Alert) alertVisual {
+	switch {
+	case !alert.IsFiring:
+		return alertVisual{label: "RESOLVED", emoji: "✅", hex: "#2ECC71", discordColor: 3066993, slackColor: "good"}
+	case alert.Severity == SeverityWarning:
+		return alertVisual{label: "WARNING", emoji: "🟡", hex: "#F1C40F", discordColor: 15844367, slackColor: "warning"}
+	default:
+		return alertVisual{label: "CRITICAL", emoji: "🔴", hex: "#E74C3C", discordColor: 15158332, slackColor: "danger"}
+	}
+}
+
+func formatAlert(alert Alert) string {
+	v := visualFor(alert)
+	return fmt.Sprintf("%s %s — %s\nHost: %s\nMetric: %s\nValue: %s (threshold %s)",
+		v.emoji, v.label, alert.Title, alert.Hostname, alert.Metric,
 		formatValue(alert.Value, alert.Unit), formatValue(alert.Threshold, alert.Unit))
 }
 
-// formatValue renders a value with its unit: percentages as "6.68%", everything
-// else with a space ("512.00 kB").
 func formatValue(value float64, unit string) string {
 	if unit == "percent" {
 		return fmt.Sprintf("%.2f%%", value)
@@ -33,21 +71,57 @@ func formatValue(value float64, unit string) string {
 	return fmt.Sprintf("%.2f %s", value, unit)
 }
 
+const maxSendAttempts = 3
+
+// postJSON POSTs payload as JSON, retrying transient failures (network, 5xx,
+// 429) with backoff; other 4xx are returned immediately. It runs synchronously
+// in the evaluator goroutine, so the retry budget is kept small (issue #9).
 func postJSON(url string, payload any) error {
 	body, err := json.Marshal(payload)
 	if err != nil {
 		return err
 	}
 
-	resp, err := httpClient.Post(url, "application/json", bytes.NewReader(body))
-	if err != nil {
-		return err
-	}
-	defer resp.Body.Close()
+	var lastErr error
+	for attempt := 0; attempt < maxSendAttempts; attempt++ {
+		wait := time.Duration(attempt+1) * time.Second
 
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return fmt.Errorf("webhook %s returned status %d", url, resp.StatusCode)
+		resp, err := httpClient.Post(url, "application/json", bytes.NewReader(body))
+		if err != nil {
+			lastErr = fmt.Errorf("%s: %v", safeURL(url), unwrapURL(err))
+		} else {
+			status := resp.StatusCode
+			retryAfter := resp.Header.Get("Retry-After")
+			io.Copy(io.Discard, resp.Body) // drain so the connection can be reused
+			resp.Body.Close()
+
+			if status >= 200 && status < 300 {
+				return nil
+			}
+			lastErr = fmt.Errorf("%s returned status %d", safeURL(url), status)
+
+			// 4xx other than 429 won't be fixed by retrying
+			if status < 500 && status != http.StatusTooManyRequests {
+				return lastErr
+			}
+			if status == http.StatusTooManyRequests {
+				if secs, e := strconv.Atoi(retryAfter); e == nil && secs > 0 && secs <= 60 {
+					wait = time.Duration(secs) * time.Second
+				}
+			}
+		}
+
+		if attempt < maxSendAttempts-1 {
+			time.Sleep(wait)
+		}
 	}
+	return lastErr
+}
+
+type ConsoleNotifier struct{}
+
+func (c *ConsoleNotifier) Send(alert Alert) error {
+	fmt.Println(formatAlert(alert))
 	return nil
 }
 
@@ -55,23 +129,73 @@ type GoogleChatNotifier struct {
 	WebhookURL string
 }
 
-type ConsoleNotifier struct{}
+func (g *GoogleChatNotifier) Send(alert Alert) error {
+	return postJSON(g.WebhookURL, map[string]string{"text": formatAlert(alert)})
+}
 
 type DiscordNotifier struct {
 	WebhookURL string
 }
 
-// Discord incoming webhooks expect a JSON body with a "content" field.
 func (d *DiscordNotifier) Send(alert Alert) error {
-	return postJSON(d.WebhookURL, map[string]string{"content": formatAlert(alert)})
+	v := visualFor(alert)
+	return postJSON(d.WebhookURL, map[string]any{
+		"embeds": []map[string]any{{
+			"description": formatAlert(alert),
+			"color":       v.discordColor,
+		}},
+	})
 }
 
-// Google Chat incoming webhooks expect a JSON body with a "text" field.
-func (g *GoogleChatNotifier) Send(alert Alert) error {
-	return postJSON(g.WebhookURL, map[string]string{"text": formatAlert(alert)})
+type SlackNotifier struct {
+	WebhookURL string
 }
 
-func (c *ConsoleNotifier) Send(alert Alert) error {
-	fmt.Println(formatAlert(alert))
-	return nil
+func (s *SlackNotifier) Send(alert Alert) error {
+	v := visualFor(alert)
+	return postJSON(s.WebhookURL, map[string]any{
+		"attachments": []map[string]any{{
+			"color":    v.slackColor,
+			"text":     formatAlert(alert),
+			"fallback": formatAlert(alert),
+		}},
+	})
+}
+
+type TelegramNotifier struct {
+	BotToken string
+	ChatID   string
+}
+
+func (t *TelegramNotifier) Send(alert Alert) error {
+	url := "https://api.telegram.org/bot" + t.BotToken + "/sendMessage"
+	return postJSON(url, map[string]any{
+		"chat_id": t.ChatID,
+		"text":    formatAlert(alert),
+	})
+}
+
+type GenericWebhookNotifier struct {
+	WebhookURL string
+}
+
+// GenericWebhookNotifier POSTs all alert fields as structured JSON for custom integrations.
+func (g *GenericWebhookNotifier) Send(alert Alert) error {
+	v := visualFor(alert)
+	status := "firing"
+	if !alert.IsFiring {
+		status = "resolved"
+	}
+	return postJSON(g.WebhookURL, map[string]any{
+		"status":    status,
+		"severity":  string(alert.Severity),
+		"title":     alert.Title,
+		"metric":    alert.Metric,
+		"value":     alert.Value,
+		"threshold": alert.Threshold,
+		"unit":      alert.Unit,
+		"hostname":  alert.Hostname,
+		"color":     v.hex,
+		"text":      formatAlert(alert),
+	})
 }
