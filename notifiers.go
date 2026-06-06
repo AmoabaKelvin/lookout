@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"strconv"
 	"time"
 )
@@ -15,6 +16,25 @@ type Notifier interface {
 }
 
 var httpClient = &http.Client{Timeout: 10 * time.Second}
+
+// safeURL reduces a URL to scheme://host so tokens embedded in the path or query
+// (e.g. a Telegram bot token, a Google Chat key/token) never reach the logs.
+func safeURL(raw string) string {
+	u, err := url.Parse(raw)
+	if err != nil || u.Host == "" {
+		return "<redacted url>"
+	}
+	return u.Scheme + "://" + u.Host
+}
+
+// unwrapURL strips the address from a *url.Error so the underlying cause can be
+// logged without the secret-bearing URL it carries.
+func unwrapURL(err error) error {
+	if ue, ok := err.(*url.Error); ok {
+		return ue.Err
+	}
+	return err
+}
 
 // alertVisual maps an alert's state and severity to the colour/label each
 // channel renders: green when resolved, red (critical) or amber (warning).
@@ -68,7 +88,7 @@ func postJSON(url string, payload any) error {
 
 		resp, err := httpClient.Post(url, "application/json", bytes.NewReader(body))
 		if err != nil {
-			lastErr = err
+			lastErr = fmt.Errorf("%s: %v", safeURL(url), unwrapURL(err))
 		} else {
 			status := resp.StatusCode
 			retryAfter := resp.Header.Get("Retry-After")
@@ -78,7 +98,7 @@ func postJSON(url string, payload any) error {
 			if status >= 200 && status < 300 {
 				return nil
 			}
-			lastErr = fmt.Errorf("webhook %s returned status %d", url, status)
+			lastErr = fmt.Errorf("%s returned status %d", safeURL(url), status)
 
 			// 4xx other than 429 won't be fixed by retrying
 			if status < 500 && status != http.StatusTooManyRequests {

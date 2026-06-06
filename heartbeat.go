@@ -7,12 +7,12 @@ import "fmt"
 func PingRemote(addr string) error {
 	resp, err := httpClient.Get(addr)
 	if err != nil {
-		return err
+		return fmt.Errorf("%s: %v", safeURL(addr), unwrapURL(err))
 	}
 
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return fmt.Errorf("healthcheck failed with status: %s", resp.Status)
+		return fmt.Errorf("healthcheck %s failed with status: %s", safeURL(addr), resp.Status)
 	}
 	return nil
 }
