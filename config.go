@@ -6,14 +6,9 @@ import (
 	"time"
 )
 
-// for now we are parsing the configuration as env
-// variables, the idea though was to use a config file
-// that will still be done but i just wanted a quick way
-// to get somethign up and running and this looked like
-// the fastest option without dealing with parsing
-// files and stuff
+// Config is loaded from environment variables (YAML config planned, issue #7).
 type Config struct {
-	CollectionInterval   time.Duration // the interval at which to collect metrics
+	CollectionInterval   time.Duration
 	MeminfoPath          string
 	MemThreshold         float64
 	DiskInfoPath         string
@@ -23,6 +18,16 @@ type Config struct {
 	HeartbeatInterval    time.Duration
 	GoogleChatWebhookURL string
 	DiscordWebhookURL    string
+	SlackWebhookURL      string
+	GenericWebhookURL    string
+	TelegramBotToken     string
+	TelegramChatID       string
+	SMTPHost             string
+	SMTPPort             string
+	SMTPUsername         string
+	SMTPPassword         string
+	SMTPFrom             string
+	SMTPTo               string // comma-separated recipients
 	Hostname             string
 	RenotifyAfter        time.Duration
 	DockerEnabled        bool
@@ -74,6 +79,16 @@ func LoadConfig() Config {
 		HeartbeatInterval:    time.Duration(getEnvAsInt("HEARTBEAT_INTERVAL", 60)) * time.Second,
 		GoogleChatWebhookURL: getEnv("GOOGLE_CHAT_WEBHOOK_URL", ""),
 		DiscordWebhookURL:    getEnv("DISCORD_WEBHOOK_URL", ""),
+		SlackWebhookURL:      getEnv("SLACK_WEBHOOK_URL", ""),
+		GenericWebhookURL:    getEnv("WEBHOOK_URL", ""),
+		TelegramBotToken:     getEnv("TELEGRAM_BOT_TOKEN", ""),
+		TelegramChatID:       getEnv("TELEGRAM_CHAT_ID", ""),
+		SMTPHost:             getEnv("SMTP_HOST", ""),
+		SMTPPort:             getEnv("SMTP_PORT", "587"),
+		SMTPUsername:         getEnv("SMTP_USERNAME", ""),
+		SMTPPassword:         getEnv("SMTP_PASSWORD", ""),
+		SMTPFrom:             getEnv("SMTP_FROM", ""),
+		SMTPTo:               getEnv("SMTP_TO", ""),
 		Hostname:             hostName,
 		RenotifyAfter:        time.Duration(getEnvAsInt("RENOTIFY_AFTER", 3600)) * time.Second,
 		DockerEnabled:        getEnvAsBool("DOCKER_ENABLED", false),

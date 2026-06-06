@@ -18,13 +18,10 @@ var version = "dev"
 func main() {
 	cfg := LoadConfig()
 
-	// Cancel the context on SIGINT/SIGTERM so the agent shuts down cleanly
-	// (important when running under systemd, which stops services with SIGTERM).
+	// shut down cleanly on SIGINT/SIGTERM (systemd stops the service with SIGTERM)
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	// Pick notifiers based on which webhook URLs are configured. With none set,
-	// fall back to the console so the agent is still useful with zero config.
 	var notifiers []Notifier
 	if cfg.GoogleChatWebhookURL != "" {
 		notifiers = append(notifiers, &GoogleChatNotifier{WebhookURL: cfg.GoogleChatWebhookURL})
@@ -32,30 +29,52 @@ func main() {
 	if cfg.DiscordWebhookURL != "" {
 		notifiers = append(notifiers, &DiscordNotifier{WebhookURL: cfg.DiscordWebhookURL})
 	}
+	if cfg.SlackWebhookURL != "" {
+		notifiers = append(notifiers, &SlackNotifier{WebhookURL: cfg.SlackWebhookURL})
+	}
+	if cfg.GenericWebhookURL != "" {
+		notifiers = append(notifiers, &GenericWebhookNotifier{WebhookURL: cfg.GenericWebhookURL})
+	}
+	if cfg.TelegramBotToken != "" && cfg.TelegramChatID != "" {
+		notifiers = append(notifiers, &TelegramNotifier{BotToken: cfg.TelegramBotToken, ChatID: cfg.TelegramChatID})
+	}
+	if cfg.SMTPHost != "" && cfg.SMTPFrom != "" && cfg.SMTPTo != "" {
+		var to []string
+		for _, addr := range strings.Split(cfg.SMTPTo, ",") {
+			if a := strings.TrimSpace(addr); a != "" {
+				to = append(to, a)
+			}
+		}
+		notifiers = append(notifiers, &SMTPNotifier{
+			Host: cfg.SMTPHost, Port: cfg.SMTPPort,
+			Username: cfg.SMTPUsername, Password: cfg.SMTPPassword,
+			From: cfg.SMTPFrom, To: to,
+		})
+	}
 	if len(notifiers) == 0 {
 		notifiers = append(notifiers, &ConsoleNotifier{})
 		fmt.Println("No webhook configured; alerts will print to the console")
 	}
 
-	// Threshold rules. The user-facing config (thresholds) is translated into
-	// these internal rules once, at startup.
+	// Severity is hardcoded until the YAML config lands (issue #7).
 	rules := []Rule{
 		{
 			Matcher:   func(s MetricSample) bool { return s.Name == "memory.used_percent" },
 			Threshold: cfg.MemThreshold,
 			Message:   "High memory usage",
+			Severity:  SeverityCritical,
 		},
 		{
 			Matcher:   func(s MetricSample) bool { return s.Collector == "disk" && strings.HasSuffix(s.Name, ".used_percent") },
 			Threshold: cfg.DiskThreshold,
 			Message:   "High disk usage",
+			Severity:  SeverityWarning,
 		},
 	}
 
 	alertManager := NewAlertManager(rules, cfg.RenotifyAfter, cfg.Hostname, notifiers)
 
-	// Docker is optional and off by default. Only create the client (a hard
-	// dependency that would otherwise fail startup) when explicitly enabled.
+	// only build the docker client when enabled; client.New would otherwise fail startup
 	var cli *client.Client
 	if cfg.DockerEnabled {
 		var err error
@@ -94,11 +113,7 @@ func main() {
 	dockerEventsEvaluationChannel := make(chan string, 100)
 	containers := make(map[string]*ContainerState)
 
-	// this is the evaluator that will be receiving events and processing them
-	// this is going to be stateful because some things need state in order
-	// for us to make good decisions. example. we need to keep track of the
-	// docker events and debounce them before we send stuff out to the alert manager
-	// we don't just fan things out
+	// single evaluator goroutine owns the alert + container state, so no mutex is needed
 	go func() {
 		for {
 			select {
