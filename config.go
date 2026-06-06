@@ -1,6 +1,7 @@
 package main
 
 import (
+	"log"
 	"os"
 	"strconv"
 	"time"
@@ -65,18 +66,29 @@ func getEnvAsFloat64(key string, fallback float64) float64 {
 	return fallback
 }
 
+// durationFromEnv reads a seconds value and guards against non-positive
+// intervals, which would otherwise panic time.NewTicker.
+func durationFromEnv(key string, fallbackSeconds int) time.Duration {
+	seconds := getEnvAsInt(key, fallbackSeconds)
+	if seconds <= 0 {
+		log.Printf("config: %s must be a positive number of seconds; using %d", key, fallbackSeconds)
+		seconds = fallbackSeconds
+	}
+	return time.Duration(seconds) * time.Second
+}
+
 func LoadConfig() Config {
 	hostName, _ := os.Hostname()
 
 	cfg := Config{
-		CollectionInterval:   time.Duration(getEnvAsInt("COLLECTION_INTERVAL", 30)) * time.Second,
+		CollectionInterval:   durationFromEnv("COLLECTION_INTERVAL", 30),
 		MeminfoPath:          getEnv("MEMINFO_PATH", "/proc/meminfo"),
 		MemThreshold:         getEnvAsFloat64("MEM_THRESHOLD", 80),
 		DiskInfoPath:         getEnv("DISKINFO_PATH", "/proc/mounts"),
 		DiskThreshold:        getEnvAsFloat64("DISK_THRESHOLD", 85),
 		TargetMounts:         []string{"/", "/home", "/var", "/boot"},
 		HeartbeatURL:         getEnv("HEARTBEAT_URL", ""),
-		HeartbeatInterval:    time.Duration(getEnvAsInt("HEARTBEAT_INTERVAL", 60)) * time.Second,
+		HeartbeatInterval:    durationFromEnv("HEARTBEAT_INTERVAL", 60),
 		GoogleChatWebhookURL: getEnv("GOOGLE_CHAT_WEBHOOK_URL", ""),
 		DiscordWebhookURL:    getEnv("DISCORD_WEBHOOK_URL", ""),
 		SlackWebhookURL:      getEnv("SLACK_WEBHOOK_URL", ""),
