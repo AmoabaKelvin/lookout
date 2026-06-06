@@ -59,16 +59,20 @@ func main() {
 	// Severity is hardcoded until the YAML config lands (issue #7).
 	rules := []Rule{
 		{
+			ID:        "memory",
 			Matcher:   func(s MetricSample) bool { return s.Name == "memory.used_percent" },
 			Threshold: cfg.MemThreshold,
 			Message:   "High memory usage",
 			Severity:  SeverityCritical,
+			For:       cfg.MemFor,
 		},
 		{
+			ID:        "disk",
 			Matcher:   func(s MetricSample) bool { return s.Collector == "disk" && strings.HasSuffix(s.Name, ".used_percent") },
 			Threshold: cfg.DiskThreshold,
 			Message:   "High disk usage",
 			Severity:  SeverityWarning,
+			For:       cfg.DiskFor,
 		},
 	}
 

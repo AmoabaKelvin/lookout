@@ -12,8 +12,10 @@ type Config struct {
 	CollectionInterval   time.Duration
 	MeminfoPath          string
 	MemThreshold         float64
+	MemFor               time.Duration
 	DiskInfoPath         string
 	DiskThreshold        float64
+	DiskFor              time.Duration
 	TargetMounts         []string
 	HeartbeatURL         string
 	HeartbeatInterval    time.Duration
@@ -66,12 +68,14 @@ func getEnvAsFloat64(key string, fallback float64) float64 {
 	return fallback
 }
 
-// durationFromEnv reads a seconds value and guards against non-positive
-// intervals, which would otherwise panic time.NewTicker.
-func durationFromEnv(key string, fallbackSeconds int) time.Duration {
+// secondsFromEnv reads a duration given in seconds. Values below minSeconds are
+// rejected and fall back to the default. Use minSeconds=1 for intervals (0 would
+// panic time.NewTicker) and minSeconds=0 for "for" windows, where 0 is valid and
+// means fire immediately.
+func secondsFromEnv(key string, fallbackSeconds, minSeconds int) time.Duration {
 	seconds := getEnvAsInt(key, fallbackSeconds)
-	if seconds <= 0 {
-		log.Printf("config: %s must be a positive number of seconds; using %d", key, fallbackSeconds)
+	if seconds < minSeconds {
+		log.Printf("config: %s must be >= %d seconds; using %d", key, minSeconds, fallbackSeconds)
 		seconds = fallbackSeconds
 	}
 	return time.Duration(seconds) * time.Second
@@ -81,14 +85,16 @@ func LoadConfig() Config {
 	hostName, _ := os.Hostname()
 
 	cfg := Config{
-		CollectionInterval:   durationFromEnv("COLLECTION_INTERVAL", 30),
+		CollectionInterval:   secondsFromEnv("COLLECTION_INTERVAL", 30, 1),
 		MeminfoPath:          getEnv("MEMINFO_PATH", "/proc/meminfo"),
 		MemThreshold:         getEnvAsFloat64("MEM_THRESHOLD", 80),
+		MemFor:               secondsFromEnv("MEM_FOR", 120, 0),
 		DiskInfoPath:         getEnv("DISKINFO_PATH", "/proc/mounts"),
 		DiskThreshold:        getEnvAsFloat64("DISK_THRESHOLD", 85),
+		DiskFor:              secondsFromEnv("DISK_FOR", 120, 0),
 		TargetMounts:         []string{"/", "/home", "/var", "/boot"},
 		HeartbeatURL:         getEnv("HEARTBEAT_URL", ""),
-		HeartbeatInterval:    durationFromEnv("HEARTBEAT_INTERVAL", 60),
+		HeartbeatInterval:    secondsFromEnv("HEARTBEAT_INTERVAL", 60, 1),
 		GoogleChatWebhookURL: getEnv("GOOGLE_CHAT_WEBHOOK_URL", ""),
 		DiscordWebhookURL:    getEnv("DISCORD_WEBHOOK_URL", ""),
 		SlackWebhookURL:      getEnv("SLACK_WEBHOOK_URL", ""),
