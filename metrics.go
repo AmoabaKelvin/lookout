@@ -9,7 +9,3 @@ type MetricSample struct {
 	Timestamp time.Time
 	Collector string
 }
-
-// type Collector interface {
-// 	Collect(ctx context.Context) ([]MetricSample, error)
-// }

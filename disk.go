@@ -18,7 +18,6 @@ func diskCollector(path string, targetMounts []string) ([]MetricSample, error) {
 		return nil, fmt.Errorf("failed to read %s: %w", path, err)
 	}
 
-	//bool is bigger than empty struct
 	targetSet := make(map[string]bool, len(targetMounts))
 	for _, m := range targetMounts {
 		targetSet[m] = true

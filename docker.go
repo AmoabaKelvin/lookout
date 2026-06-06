@@ -16,7 +16,7 @@ type DockerEvent struct {
 	ID         string
 	Timestamp  time.Time
 	Action     string
-	Attributes map[string]string // this will have info about say the image, exit code
+	Attributes map[string]string
 }
 
 type State string
@@ -53,13 +53,7 @@ func dockerCollector(cli *client.Client, ctx context.Context, dockerEventsChanne
 			fmt.Printf("[docker] event stream error: %v\n", err)
 		}
 
-		// we are listening to the events from the docker daemon, the reason we are
-		// sleeping here is so if there's any issue with the daemon, we try again
-		// after some time in order to resume listening to the events
-		// we will be looking at a better way to do this though.
-		// issue here is after sleeping for 2 seconds, assuming there were events
-		// that happened during that time, we will miss them all. so we need to always
-		// start checking / listening to events for every 2 seconds before.
+		// reconnect after a brief pause; events during the gap are missed (issue #3)
 		time.Sleep(2 * time.Second)
 	}
 }
@@ -100,9 +94,8 @@ func listenDockerEvents(cli *client.Client, ctx context.Context, f client.Filter
 	}
 }
 
-// handleDockerEvent updates the tracked state for a container from a single
-// docker event. A "die" is debounced through evalCh so a quick restart can
-// cancel the pending failure evaluation.
+// handleDockerEvent updates container state from one event. A die is debounced
+// via evalCh so a quick restart can cancel the pending failure evaluation.
 func handleDockerEvent(containers map[string]*ContainerState, dockerEvent DockerEvent, evalCh chan<- string) {
 	container := containers[dockerEvent.ID]
 	if container == nil {
@@ -123,11 +116,8 @@ func handleDockerEvent(containers map[string]*ContainerState, dockerEvent Docker
 	case "start", "restart":
 		container.State = Running
 		container.StartedAt = dockerEvent.Timestamp
-		// container.HasOOM, container.HasStopped, container.PendingDie = false, false, false
-		// evaluateContainer(container)
 
 		if container.PendingDie && container.LastDieAt.Before(container.StartedAt) {
-			// we should mark as resolved
 			container.PendingDie = false
 			// TODO: evaluate the restart loop here
 		}
@@ -140,7 +130,6 @@ func handleDockerEvent(containers map[string]*ContainerState, dockerEvent Docker
 		container.DieTimes = append(container.DieTimes, dockerEvent.Timestamp)
 		container.PendingDie = true
 
-		// a way to trigger an evaluation after X seconds after the die has happened
 		id := dockerEvent.ID
 		time.AfterFunc(1500*time.Millisecond, func() {
 			evalCh <- id
@@ -149,7 +138,7 @@ func handleDockerEvent(containers map[string]*ContainerState, dockerEvent Docker
 		container.LastStopAt = dockerEvent.Timestamp
 	case "oom":
 		container.LastOOMAt = dockerEvent.Timestamp
-		// FIX: we will have the correct alerts for this later
+		// TODO: proper OOM alert
 		fmt.Printf("The container %s was killed because of an OOM", container.ID)
 	}
 }
@@ -157,14 +146,12 @@ func handleDockerEvent(containers map[string]*ContainerState, dockerEvent Docker
 func evaluateContainer(c *ContainerState) {
 	if c.PendingDie {
 		if !c.LastOOMAt.IsZero() {
-			// died with an OOM
 			fmt.Printf("the container %s died with an OOM, immediate alert", c.ID)
 		} else if !c.LastStopAt.IsZero() && c.LastExit != 0 {
 			fmt.Printf("the container %s did not die cleanly", c.ID)
 		}
 
 		if c.LastExit != 0 {
-			// the container did not die cleanly
 			fmt.Printf("The container did not die cleanly")
 		}
 	}

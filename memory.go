@@ -16,9 +16,8 @@ func memoryCollector(path string) ([]MetricSample, error) {
 		return []MetricSample{}, errors.New("There was an issue reading the /proc/memory file")
 	}
 
-	// proc/memory has key value pairs, separated by : and the values have KB
+	// /proc/meminfo lines look like "MemTotal:  8185712 kB"
 	parts := strings.SplitSeq(string(data), "\n")
-	// convert the data into a map of key value pairs and then we read each of those key value stuff
 	for part := range parts {
 		if part == "" {
 			continue
