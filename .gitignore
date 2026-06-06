@@ -7,3 +7,6 @@
 # real config with secrets (never commit)
 *.env
 /etc/
+
+# local working notes (never commit)
+plan.md
