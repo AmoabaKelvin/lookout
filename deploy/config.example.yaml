@@ -1,0 +1,52 @@
+# Lookout configuration.
+# On a server this is installed to /etc/lookout/config.yaml by install.sh.
+# Durations are strings: 30s, 2m, 1h.
+
+collection_interval: 30s
+
+alerts:
+  renotify_after: 1h
+  memory:
+    threshold: 85
+    for: 2m
+    severity: critical
+  disk:
+    threshold: 85
+    for: 2m
+    severity: warning
+    mounts:
+      - /
+      - /home
+      - /var
+      - /boot
+
+# Alerts fan out to every notifier you configure. Uncomment the ones you want.
+notifiers:
+  # google_chat:
+  #   webhook_url: "https://chat.googleapis.com/v1/spaces/XXX/messages?key=...&token=..."
+  # discord:
+  #   webhook_url: "https://discord.com/api/webhooks/XXX/YYY"
+  # slack:
+  #   webhook_url: "https://hooks.slack.com/services/XXX/YYY/ZZZ"
+  # telegram:
+  #   bot_token: "123456:ABC..."
+  #   chat_id: "987654321"
+  # webhook:
+  #   url: "https://example.com/hooks/lookout"
+  # email:
+  #   host: "smtp.example.com"
+  #   port: 587
+  #   username: ""
+  #   password: ""
+  #   from: "lookout@example.com"
+  #   to:
+  #     - "you@example.com"
+
+# Optional dead-man's switch: lookout pings this URL on an interval; when the
+# pings stop, the external service (e.g. healthchecks.io) alerts you.
+heartbeat:
+  # url: "https://hc-ping.com/your-uuid"
+  interval: 60s
+
+docker:
+  enabled: false

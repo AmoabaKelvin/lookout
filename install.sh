@@ -3,7 +3,7 @@ set -eu
 
 # Lookout installer. Downloads the release binary matching this server's
 # architecture, verifies its checksum, installs it as a systemd service running
-# under a dedicated unprivileged user, and writes a config template.
+# under a dedicated unprivileged user, and writes a YAML config template.
 #
 # Usage (as root):
 #   curl -fsSL https://raw.githubusercontent.com/AmoabaKelvin/lookout/main/install.sh | sudo sh
@@ -14,7 +14,7 @@ set -eu
 REPO="AmoabaKelvin/lookout"
 BIN_DIR="/usr/local/bin"
 CONF_DIR="/etc/lookout"
-ENV_FILE="${CONF_DIR}/lookout.env"
+CONF_FILE="${CONF_DIR}/config.yaml"
 UNIT_FILE="/etc/systemd/system/lookout.service"
 SERVICE_USER="lookout"
 
@@ -69,40 +69,67 @@ fi
 
 # --- config template (never overwrite an existing config) ---
 mkdir -p "$CONF_DIR"
-if [ ! -f "$ENV_FILE" ]; then
-  cat > "$ENV_FILE" <<'EOF'
-# Lookout configuration (read as environment variables).
-# Durations are in SECONDS (plain integers).
+if [ ! -f "$CONF_FILE" ]; then
+  cat > "$CONF_FILE" <<'EOF'
+# Lookout configuration.
+# Durations are strings: 30s, 2m, 1h.
 
-# --- alerting destination: set ONE (or both), then restart the service ---
-# GOOGLE_CHAT_WEBHOOK_URL=
-# DISCORD_WEBHOOK_URL=
+collection_interval: 30s
 
-# --- thresholds (percent, 0-100) ---
-MEM_THRESHOLD=85
-DISK_THRESHOLD=85
+alerts:
+  renotify_after: 1h
+  memory:
+    threshold: 85
+    for: 2m
+    severity: critical
+  disk:
+    threshold: 85
+    for: 2m
+    severity: warning
+    mounts:
+      - /
+      - /home
+      - /var
+      - /boot
 
-# --- timing (seconds) ---
-COLLECTION_INTERVAL=30
-RENOTIFY_AFTER=3600
+# Alerts fan out to every notifier you configure. Uncomment the ones you want,
+# then restart the service.
+notifiers:
+  # google_chat:
+  #   webhook_url: "https://chat.googleapis.com/v1/spaces/XXX/messages?key=...&token=..."
+  # discord:
+  #   webhook_url: "https://discord.com/api/webhooks/XXX/YYY"
+  # slack:
+  #   webhook_url: "https://hooks.slack.com/services/XXX/YYY/ZZZ"
+  # telegram:
+  #   bot_token: "123456:ABC..."
+  #   chat_id: "987654321"
+  # webhook:
+  #   url: "https://example.com/hooks/lookout"
+  # email:
+  #   host: "smtp.example.com"
+  #   port: 587
+  #   username: ""
+  #   password: ""
+  #   from: "lookout@example.com"
+  #   to:
+  #     - "you@example.com"
 
-# --- optional external heartbeat (e.g. a healthchecks.io ping URL) ---
-# HEARTBEAT_URL=
-# HEARTBEAT_INTERVAL=60
+# Optional dead-man's switch: lookout pings this URL on an interval; when the
+# pings stop, the external service (e.g. healthchecks.io) alerts you.
+heartbeat:
+  # url: "https://hc-ping.com/your-uuid"
+  interval: 60s
 
-# --- metric sources (defaults are correct for Linux) ---
-MEMINFO_PATH=/proc/meminfo
-DISKINFO_PATH=/proc/mounts
-
-# --- docker event monitoring (paused for now) ---
-DOCKER_ENABLED=false
+docker:
+  enabled: false
 EOF
-  echo "Created config template -> ${ENV_FILE}"
+  echo "Created config template -> ${CONF_FILE}"
 else
-  echo "Kept existing config -> ${ENV_FILE}"
+  echo "Kept existing config -> ${CONF_FILE}"
 fi
-chmod 600 "$ENV_FILE"
-chown "${SERVICE_USER}:${SERVICE_USER}" "$ENV_FILE"
+chmod 600 "$CONF_FILE"
+chown "${SERVICE_USER}:${SERVICE_USER}" "$CONF_FILE"
 
 # --- systemd unit ---
 cat > "$UNIT_FILE" <<EOF
@@ -115,8 +142,7 @@ Wants=network-online.target
 Type=simple
 User=${SERVICE_USER}
 Group=${SERVICE_USER}
-ExecStart=${BIN_DIR}/lookout
-EnvironmentFile=${ENV_FILE}
+ExecStart=${BIN_DIR}/lookout --config ${CONF_FILE}
 Restart=always
 RestartSec=5
 NoNewPrivileges=true
@@ -133,11 +159,11 @@ systemctl daemon-reload
 systemctl enable --now lookout
 
 echo
-echo "lookout ${VERSION} is installed and running (alerts go to the journal until a webhook is set)."
+echo "lookout ${VERSION} is installed and running (alerts go to the journal until a notifier is set)."
 echo
 echo "Next steps:"
-echo "  1. Add your webhook:   sudo nano ${ENV_FILE}"
-echo "       uncomment GOOGLE_CHAT_WEBHOOK_URL= (or DISCORD_WEBHOOK_URL=) and paste your URL"
+echo "  1. Add a notifier:     sudo nano ${CONF_FILE}"
+echo "       uncomment a notifier under 'notifiers:' and paste your webhook URL"
 echo "  2. Restart:            sudo systemctl restart lookout"
 echo "  3. Watch logs:         journalctl -u lookout -f"
 echo
