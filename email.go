@@ -10,7 +10,7 @@ import (
 // Implicit-TLS servers (port 465) are tracked in issue #12.
 type SMTPNotifier struct {
 	Host     string
-	Port     string
+	Port     int
 	Username string
 	Password string
 	From     string
@@ -30,7 +30,7 @@ func (s *SMTPNotifier) Send(alert Alert) error {
 	msg.WriteString("\r\n")
 	msg.WriteString(smtpHTMLBody(alert, v))
 
-	addr := s.Host + ":" + s.Port
+	addr := fmt.Sprintf("%s:%d", s.Host, s.Port)
 	auth := smtp.PlainAuth("", s.Username, s.Password, s.Host)
 	return smtp.SendMail(addr, auth, s.From, s.To, []byte(msg.String()))
 }

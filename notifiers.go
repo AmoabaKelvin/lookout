@@ -15,6 +15,35 @@ type Notifier interface {
 	Send(alert Alert) error
 }
 
+// buildNotifiers turns the configured notifier sections into live notifiers. A
+// nil section (absent from the config) or one missing its credentials is skipped.
+func buildNotifiers(cfg NotifiersConfig) []Notifier {
+	var notifiers []Notifier
+	if n := cfg.GoogleChat; n != nil && n.WebhookURL != "" {
+		notifiers = append(notifiers, &GoogleChatNotifier{WebhookURL: n.WebhookURL})
+	}
+	if n := cfg.Discord; n != nil && n.WebhookURL != "" {
+		notifiers = append(notifiers, &DiscordNotifier{WebhookURL: n.WebhookURL})
+	}
+	if n := cfg.Slack; n != nil && n.WebhookURL != "" {
+		notifiers = append(notifiers, &SlackNotifier{WebhookURL: n.WebhookURL})
+	}
+	if n := cfg.Webhook; n != nil && n.URL != "" {
+		notifiers = append(notifiers, &GenericWebhookNotifier{WebhookURL: n.URL})
+	}
+	if n := cfg.Telegram; n != nil && n.BotToken != "" && n.ChatID != "" {
+		notifiers = append(notifiers, &TelegramNotifier{BotToken: n.BotToken, ChatID: n.ChatID})
+	}
+	if n := cfg.Email; n != nil && n.Host != "" && n.From != "" && len(n.To) > 0 {
+		notifiers = append(notifiers, &SMTPNotifier{
+			Host: n.Host, Port: n.Port,
+			Username: n.Username, Password: n.Password,
+			From: n.From, To: n.To,
+		})
+	}
+	return notifiers
+}
+
 var httpClient = &http.Client{Timeout: 10 * time.Second}
 
 // safeURL reduces a URL to scheme://host so tokens embedded in the path or query

@@ -2,7 +2,9 @@ package main
 
 import (
 	"context"
+	"flag"
 	"fmt"
+	"log"
 	"os"
 	"os/signal"
 	"strings"
@@ -16,71 +18,48 @@ import (
 var version = "dev"
 
 func main() {
-	cfg := LoadConfig()
+	configPath := flag.String("config", defaultConfigPath, "path to the config file")
+	flag.Parse()
+
+	cfg, err := LoadConfig(*configPath)
+	if err != nil {
+		log.Fatalf("config: %v", err)
+	}
 
 	// shut down cleanly on SIGINT/SIGTERM (systemd stops the service with SIGTERM)
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	var notifiers []Notifier
-	if cfg.GoogleChatWebhookURL != "" {
-		notifiers = append(notifiers, &GoogleChatNotifier{WebhookURL: cfg.GoogleChatWebhookURL})
-	}
-	if cfg.DiscordWebhookURL != "" {
-		notifiers = append(notifiers, &DiscordNotifier{WebhookURL: cfg.DiscordWebhookURL})
-	}
-	if cfg.SlackWebhookURL != "" {
-		notifiers = append(notifiers, &SlackNotifier{WebhookURL: cfg.SlackWebhookURL})
-	}
-	if cfg.GenericWebhookURL != "" {
-		notifiers = append(notifiers, &GenericWebhookNotifier{WebhookURL: cfg.GenericWebhookURL})
-	}
-	if cfg.TelegramBotToken != "" && cfg.TelegramChatID != "" {
-		notifiers = append(notifiers, &TelegramNotifier{BotToken: cfg.TelegramBotToken, ChatID: cfg.TelegramChatID})
-	}
-	if cfg.SMTPHost != "" && cfg.SMTPFrom != "" && cfg.SMTPTo != "" {
-		var to []string
-		for _, addr := range strings.Split(cfg.SMTPTo, ",") {
-			if a := strings.TrimSpace(addr); a != "" {
-				to = append(to, a)
-			}
-		}
-		notifiers = append(notifiers, &SMTPNotifier{
-			Host: cfg.SMTPHost, Port: cfg.SMTPPort,
-			Username: cfg.SMTPUsername, Password: cfg.SMTPPassword,
-			From: cfg.SMTPFrom, To: to,
-		})
-	}
+	notifiers := buildNotifiers(cfg.Notifiers)
 	if len(notifiers) == 0 {
 		notifiers = append(notifiers, &ConsoleNotifier{})
-		fmt.Println("No webhook configured; alerts will print to the console")
+		fmt.Println("No notifier configured; alerts will print to the console")
 	}
 
-	// Severity is hardcoded until the YAML config lands (issue #7).
 	rules := []Rule{
 		{
 			ID:        "memory",
 			Matcher:   func(s MetricSample) bool { return s.Name == "memory.used_percent" },
-			Threshold: cfg.MemThreshold,
+			Threshold: cfg.Alerts.Memory.Threshold,
 			Message:   "High memory usage",
-			Severity:  SeverityCritical,
-			For:       cfg.MemFor,
+			Severity:  cfg.Alerts.Memory.Severity,
+			For:       cfg.Alerts.Memory.For.Std(),
 		},
 		{
 			ID:        "disk",
 			Matcher:   func(s MetricSample) bool { return s.Collector == "disk" && strings.HasSuffix(s.Name, ".used_percent") },
-			Threshold: cfg.DiskThreshold,
+			Threshold: cfg.Alerts.Disk.Threshold,
 			Message:   "High disk usage",
-			Severity:  SeverityWarning,
-			For:       cfg.DiskFor,
+			Severity:  cfg.Alerts.Disk.Severity,
+			For:       cfg.Alerts.Disk.For.Std(),
 		},
 	}
 
-	alertManager := NewAlertManager(rules, cfg.RenotifyAfter, cfg.Hostname, notifiers)
+	alertManager := NewAlertManager(rules, cfg.Alerts.RenotifyAfter.Std(), cfg.Hostname, notifiers)
 
 	// only build the docker client when enabled; client.New would otherwise fail startup
 	var cli *client.Client
-	if cfg.DockerEnabled {
+	if cfg.Docker.Enabled {
 		var err error
 		cli, err = client.New(client.FromEnv)
 		if err != nil {
@@ -90,13 +69,13 @@ func main() {
 		defer cli.Close()
 	}
 
-	if cfg.HeartbeatURL != "" {
+	if cfg.Heartbeat.URL != "" {
 		go func() {
-			if err := PingRemote(cfg.HeartbeatURL); err != nil {
+			if err := PingRemote(cfg.Heartbeat.URL); err != nil {
 				fmt.Printf("Initial heartbeat failed: %v\n", err)
 			}
 
-			ticker := time.NewTicker(cfg.HeartbeatInterval)
+			ticker := time.NewTicker(cfg.Heartbeat.Interval.Std())
 			defer ticker.Stop()
 
 			for {
@@ -104,7 +83,7 @@ func main() {
 				case <-ctx.Done():
 					return
 				case <-ticker.C:
-					if err := PingRemote(cfg.HeartbeatURL); err != nil {
+					if err := PingRemote(cfg.Heartbeat.URL); err != nil {
 						fmt.Printf("Heartbeat failed: %v\n", err)
 					}
 				}
@@ -147,12 +126,12 @@ func main() {
 
 	fmt.Printf("Starting lookout %s on %s (Ctrl+C to stop)\n", version, cfg.Hostname)
 
-	if cfg.DockerEnabled {
+	if cfg.Docker.Enabled {
 		go dockerCollector(cli, ctx, dockerEventsChannel)
 	}
 
 	collect := func() {
-		data, err := memoryCollector(cfg.MeminfoPath)
+		data, err := memoryCollector(cfg.Alerts.Memory.Source)
 		if err != nil {
 			fmt.Printf("Error collecting memory info: %v\n", err)
 		} else {
@@ -161,7 +140,7 @@ func main() {
 			}
 		}
 
-		diskData, err := diskCollector(cfg.DiskInfoPath, cfg.TargetMounts)
+		diskData, err := diskCollector(cfg.Alerts.Disk.Source, cfg.Alerts.Disk.Mounts)
 		if err != nil {
 			fmt.Printf("Error collecting disk info: %v\n", err)
 		} else {
@@ -171,7 +150,7 @@ func main() {
 		}
 	}
 
-	ticker := time.NewTicker(cfg.CollectionInterval)
+	ticker := time.NewTicker(cfg.CollectionInterval.Std())
 	defer ticker.Stop()
 
 	collect() // collect once at startup instead of waiting a full interval
