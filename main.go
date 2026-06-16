@@ -5,6 +5,7 @@ import (
 	"flag"
 	"fmt"
 	"log"
+	"net/url"
 	"os"
 	"os/signal"
 	"strings"
@@ -38,10 +39,15 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	notifiers := buildNotifiers(cfg.Notifiers)
+	notifiers, activeNotifiers, err := buildNotifiers(cfg.Notifiers)
+	if err != nil {
+		log.Fatalf("notifiers: %v", err)
+	}
 	if len(notifiers) == 0 {
 		notifiers = append(notifiers, &ConsoleNotifier{})
 		fmt.Println("No notifier configured; alerts will print to the console")
+	} else {
+		fmt.Printf("Active notifiers: %s\n", strings.Join(activeNotifiers, ", "))
 	}
 	notifierQueue := newAsyncNotifier(notifiers, notifierQueueSize)
 	go notifierQueue.Run(ctx)
@@ -221,31 +227,84 @@ func trackedMetrics(cfg Config) []TrackedMetric {
 	return tracked
 }
 
-// buildNotifiers maps the configured notifier sections to live notifiers. A nil
-// section (absent from the config) or one missing its credentials is skipped.
-func buildNotifiers(cfg NotifiersConfig) []Notifier {
+// buildNotifiers maps configured notifier sections to live notifiers. A nil
+// section is absent; a present but incomplete section is a startup error.
+func buildNotifiers(cfg NotifiersConfig) ([]Notifier, []string, error) {
 	var notifiers []Notifier
-	if n := cfg.GoogleChat; n != nil && n.WebhookURL != "" {
+	var active []string
+
+	if n := cfg.GoogleChat; n != nil {
+		if err := validateWebhookURL("notifiers.google_chat.webhook_url", n.WebhookURL); err != nil {
+			return nil, nil, err
+		}
 		notifiers = append(notifiers, &GoogleChatNotifier{WebhookURL: n.WebhookURL})
+		active = append(active, "google_chat")
 	}
-	if n := cfg.Discord; n != nil && n.WebhookURL != "" {
+	if n := cfg.Discord; n != nil {
+		if err := validateWebhookURL("notifiers.discord.webhook_url", n.WebhookURL); err != nil {
+			return nil, nil, err
+		}
 		notifiers = append(notifiers, &DiscordNotifier{WebhookURL: n.WebhookURL})
+		active = append(active, "discord")
 	}
-	if n := cfg.Slack; n != nil && n.WebhookURL != "" {
+	if n := cfg.Slack; n != nil {
+		if err := validateWebhookURL("notifiers.slack.webhook_url", n.WebhookURL); err != nil {
+			return nil, nil, err
+		}
 		notifiers = append(notifiers, &SlackNotifier{WebhookURL: n.WebhookURL})
+		active = append(active, "slack")
 	}
-	if n := cfg.Webhook; n != nil && n.URL != "" {
+	if n := cfg.Webhook; n != nil {
+		if err := validateWebhookURL("notifiers.webhook.url", n.URL); err != nil {
+			return nil, nil, err
+		}
 		notifiers = append(notifiers, &GenericWebhookNotifier{WebhookURL: n.URL})
+		active = append(active, "webhook")
 	}
-	if n := cfg.Telegram; n != nil && n.BotToken != "" && n.ChatID != "" {
+	if n := cfg.Telegram; n != nil {
+		if n.BotToken == "" {
+			return nil, nil, fmt.Errorf("notifiers.telegram.bot_token is required")
+		}
+		if n.ChatID == "" {
+			return nil, nil, fmt.Errorf("notifiers.telegram.chat_id is required")
+		}
 		notifiers = append(notifiers, &TelegramNotifier{BotToken: n.BotToken, ChatID: n.ChatID})
+		active = append(active, "telegram")
 	}
-	if n := cfg.Email; n != nil && n.Host != "" && n.From != "" && len(n.To) > 0 {
+	if n := cfg.Email; n != nil {
+		if err := validateEmailNotifier(n); err != nil {
+			return nil, nil, err
+		}
 		notifiers = append(notifiers, &SMTPNotifier{
 			Host: n.Host, Port: n.Port,
 			Username: n.Username, Password: n.Password,
 			From: n.From, To: n.To,
 		})
+		active = append(active, "email")
 	}
-	return notifiers
+	return notifiers, active, nil
+}
+
+func validateWebhookURL(name string, raw string) error {
+	u, err := url.Parse(raw)
+	if err != nil || u.Host == "" || (u.Scheme != "http" && u.Scheme != "https") {
+		return fmt.Errorf("%s must be a valid http or https URL", name)
+	}
+	return nil
+}
+
+func validateEmailNotifier(n *EmailConfig) error {
+	if n.Host == "" {
+		return fmt.Errorf("notifiers.email.host is required")
+	}
+	if n.Port <= 0 || n.Port > 65535 {
+		return fmt.Errorf("notifiers.email.port must be between 1 and 65535")
+	}
+	if n.From == "" {
+		return fmt.Errorf("notifiers.email.from is required")
+	}
+	if len(n.To) == 0 {
+		return fmt.Errorf("notifiers.email.to must contain at least one recipient")
+	}
+	return nil
 }

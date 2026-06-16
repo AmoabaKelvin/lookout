@@ -123,6 +123,60 @@ func TestAsyncNotifierDoesNotBlockWhenQueueIsFull(t *testing.T) {
 	close(blocking.release)
 }
 
+func TestBuildNotifiersValidatesAndReturnsActiveNames(t *testing.T) {
+	notifiers, active, err := buildNotifiers(NotifiersConfig{
+		Slack:    &WebhookConfig{WebhookURL: "https://hooks.slack.com/services/X/Y/Z"},
+		Webhook:  &GenericConfig{URL: "https://example.com/lookout"},
+		Telegram: &TelegramConfig{BotToken: "token", ChatID: "chat"},
+		Email: &EmailConfig{
+			Host: "smtp.example.com",
+			Port: 587,
+			From: "lookout@example.com",
+			To:   []string{"ops@example.com"},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(notifiers) != 4 {
+		t.Fatalf("notifiers = %d, want 4", len(notifiers))
+	}
+	if got := strings.Join(active, ","); got != "slack,webhook,telegram,email" {
+		t.Fatalf("active notifiers = %q", got)
+	}
+}
+
+func TestBuildNotifiersRejectsInvalidWebhookURL(t *testing.T) {
+	_, _, err := buildNotifiers(NotifiersConfig{
+		Slack: &WebhookConfig{WebhookURL: "not-a-url"},
+	})
+	if err == nil || !strings.Contains(err.Error(), "notifiers.slack.webhook_url") {
+		t.Fatalf("expected slack webhook validation error, got %v", err)
+	}
+}
+
+func TestBuildNotifiersRejectsIncompleteTelegram(t *testing.T) {
+	_, _, err := buildNotifiers(NotifiersConfig{
+		Telegram: &TelegramConfig{BotToken: "token"},
+	})
+	if err == nil || !strings.Contains(err.Error(), "notifiers.telegram.chat_id") {
+		t.Fatalf("expected telegram chat_id validation error, got %v", err)
+	}
+}
+
+func TestBuildNotifiersRejectsInvalidEmailPort(t *testing.T) {
+	_, _, err := buildNotifiers(NotifiersConfig{
+		Email: &EmailConfig{
+			Host: "smtp.example.com",
+			From: "lookout@example.com",
+			To:   []string{"ops@example.com"},
+		},
+	})
+	if err == nil || !strings.Contains(err.Error(), "notifiers.email.port") {
+		t.Fatalf("expected email port validation error, got %v", err)
+	}
+}
+
 func notifierTestAlert() Alert {
 	return Alert{
 		IsFiring:  true,
