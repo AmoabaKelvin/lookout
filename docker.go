@@ -47,39 +47,64 @@ func dockerCollector(cli *client.Client, ctx context.Context, dockerEventsChanne
 	f := make(client.Filters).Add("type", "container")
 	fmt.Println("Listening to Docker container events...")
 
+	var lastSeen time.Time
 	for ctx.Err() == nil {
-		err := listenDockerEvents(cli, ctx, f, dockerEventsChannel)
+		latest, err := listenDockerEvents(cli, ctx, f, lastSeen, dockerEventsChannel)
+		if latest.After(lastSeen) {
+			lastSeen = latest
+		}
 		if err != nil && !errors.Is(err, context.Canceled) {
 			fmt.Printf("[docker] event stream error: %v\n", err)
 		}
 
-		// reconnect after a brief pause; events during the gap are missed (issue #3)
-		time.Sleep(2 * time.Second)
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(2 * time.Second):
+		}
 	}
 }
 
-func listenDockerEvents(cli *client.Client, ctx context.Context, f client.Filters, dockerEventsChannel chan<- DockerEvent) error {
-	result := cli.Events(ctx, client.EventsListOptions{Filters: f})
+func listenDockerEvents(cli *client.Client, ctx context.Context, f client.Filters, since time.Time, dockerEventsChannel chan<- DockerEvent) (time.Time, error) {
+	options := client.EventsListOptions{Filters: f}
+	if !since.IsZero() {
+		options.Since = dockerEventSince(since)
+	}
+	result := cli.Events(ctx, options)
+	latest := since
 
 	for {
 		select {
 		case <-ctx.Done():
-			return ctx.Err()
+			return latest, ctx.Err()
 
 		case event, ok := <-result.Messages:
 			if !ok {
-				return io.EOF
+				return latest, io.EOF
+			}
+
+			eventTime := dockerMessageTime(event)
+			if !eventTime.IsZero() {
+				if skipDockerReplayEvent(since, eventTime) {
+					continue
+				}
+				if eventTime.After(latest) {
+					latest = eventTime
+				}
 			}
 
 			name := event.Actor.Attributes["name"]
-			timestamp := time.Unix(event.Time, 0).Format("15:04:05")
+			timestamp := "unknown"
+			if !eventTime.IsZero() {
+				timestamp = eventTime.Format("15:04:05")
+			}
 			fmt.Printf("[docker] [%s] %s\n", timestamp, name)
 
 			switch event.Action {
 			case events.ActionDie, events.ActionOOM, events.ActionRestart, events.ActionStart, events.ActionStop:
 				dockerEventsChannel <- DockerEvent{
 					ID:         event.Actor.ID,
-					Timestamp:  time.Unix(event.Time, 0),
+					Timestamp:  eventTime,
 					Action:     string(event.Action),
 					Attributes: event.Actor.Attributes,
 				}
@@ -87,11 +112,29 @@ func listenDockerEvents(cli *client.Client, ctx context.Context, f client.Filter
 
 		case err, ok := <-result.Err:
 			if !ok || err == nil {
-				return io.EOF
+				return latest, io.EOF
 			}
-			return err
+			return latest, err
 		}
 	}
+}
+
+func dockerMessageTime(event events.Message) time.Time {
+	if event.TimeNano > 0 {
+		return time.Unix(0, event.TimeNano)
+	}
+	if event.Time > 0 {
+		return time.Unix(event.Time, 0)
+	}
+	return time.Time{}
+}
+
+func dockerEventSince(t time.Time) string {
+	return fmt.Sprintf("%d.%09d", t.Unix(), t.Nanosecond())
+}
+
+func skipDockerReplayEvent(since time.Time, eventTime time.Time) bool {
+	return !since.IsZero() && !eventTime.IsZero() && !eventTime.After(since)
 }
 
 // handleDockerEvent updates container state from one event. A die is debounced
