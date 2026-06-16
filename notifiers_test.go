@@ -135,8 +135,12 @@ func TestAsyncNotifierDoesNotBlockWhenQueueIsFull(t *testing.T) {
 func TestBuildNotifiersValidatesAndReturnsActiveNames(t *testing.T) {
 	notifiers, active, err := buildNotifiers(NotifiersConfig{
 		Slack:    &WebhookConfig{WebhookURL: "https://hooks.slack.com/services/X/Y/Z"},
+		Teams:    &WebhookConfig{WebhookURL: "https://example.webhook.office.com/team"},
 		Webhook:  &GenericConfig{URL: "https://example.com/lookout"},
 		Telegram: &TelegramConfig{BotToken: "token", ChatID: "chat"},
+		PagerDuty: &PagerDutyConfig{
+			IntegrationKey: "pagerduty-key",
+		},
 		Email: &EmailConfig{
 			Host:        "smtp.example.com",
 			Port:        587,
@@ -148,15 +152,15 @@ func TestBuildNotifiersValidatesAndReturnsActiveNames(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(notifiers) != 4 {
-		t.Fatalf("notifiers = %d, want 4", len(notifiers))
+	if len(notifiers) != 6 {
+		t.Fatalf("notifiers = %d, want 6", len(notifiers))
 	}
-	if got := strings.Join(active, ","); got != "slack,webhook,telegram,email" {
+	if got := strings.Join(active, ","); got != "slack,teams,webhook,telegram,pagerduty,email" {
 		t.Fatalf("active notifiers = %q", got)
 	}
-	smtpNotifier, ok := notifiers[3].(*SMTPNotifier)
+	smtpNotifier, ok := notifiers[5].(*SMTPNotifier)
 	if !ok || !smtpNotifier.ImplicitTLS {
-		t.Fatalf("email notifier did not keep implicit TLS setting: %#v", notifiers[3])
+		t.Fatalf("email notifier did not keep implicit TLS setting: %#v", notifiers[5])
 	}
 }
 
@@ -175,6 +179,15 @@ func TestBuildNotifiersRejectsIncompleteTelegram(t *testing.T) {
 	})
 	if err == nil || !strings.Contains(err.Error(), "notifiers.telegram.chat_id") {
 		t.Fatalf("expected telegram chat_id validation error, got %v", err)
+	}
+}
+
+func TestBuildNotifiersRejectsIncompletePagerDuty(t *testing.T) {
+	_, _, err := buildNotifiers(NotifiersConfig{
+		PagerDuty: &PagerDutyConfig{},
+	})
+	if err == nil || !strings.Contains(err.Error(), "notifiers.pagerduty.integration_key") {
+		t.Fatalf("expected pagerduty integration_key validation error, got %v", err)
 	}
 }
 
@@ -289,6 +302,29 @@ func TestSlackNotifierPayload(t *testing.T) {
 	}
 }
 
+func TestTeamsNotifierPayload(t *testing.T) {
+	payload := captureWebhookPayload(t, func(url string) error {
+		return (&TeamsNotifier{WebhookURL: url}).Send(notifierTestAlert())
+	})
+
+	if got := payload["type"]; got != "message" {
+		t.Fatalf("type = %v, want message", got)
+	}
+	attachments, ok := payload["attachments"].([]any)
+	if !ok || len(attachments) != 1 {
+		t.Fatalf("expected one attachment, got %+v", payload)
+	}
+	attachment, _ := attachments[0].(map[string]any)
+	content, _ := attachment["content"].(map[string]any)
+	if content["type"] != "AdaptiveCard" {
+		t.Fatalf("expected adaptive card content, got %+v", content)
+	}
+	body, _ := content["body"].([]any)
+	if len(body) == 0 {
+		t.Fatalf("expected adaptive card body, got %+v", content)
+	}
+}
+
 func TestGenericWebhookNotifierPayload(t *testing.T) {
 	payload := captureWebhookPayload(t, func(url string) error {
 		return (&GenericWebhookNotifier{WebhookURL: url}).Send(notifierTestAlert())
@@ -312,6 +348,35 @@ func TestGenericWebhookNotifierPayload(t *testing.T) {
 	}
 	if text, _ := payload["text"].(string); !strings.Contains(text, "memory.used_percent") {
 		t.Fatalf("text %q missing metric", text)
+	}
+}
+
+func TestPagerDutyNotifierPayload(t *testing.T) {
+	transport := &captureTransport{t: t}
+	originalClient := httpClient
+	httpClient = &http.Client{Transport: transport}
+	t.Cleanup(func() { httpClient = originalClient })
+
+	err := (&PagerDutyNotifier{IntegrationKey: "routing-key"}).Send(notifierTestAlert())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if transport.url != "https://events.pagerduty.com/v2/enqueue" {
+		t.Fatalf("pagerduty URL = %q", transport.url)
+	}
+	if got := transport.payload["routing_key"]; got != "routing-key" {
+		t.Fatalf("routing_key = %v", got)
+	}
+	if got := transport.payload["event_action"]; got != "trigger" {
+		t.Fatalf("event_action = %v", got)
+	}
+	if got := transport.payload["dedup_key"]; got != "host-a:memory.used_percent" {
+		t.Fatalf("dedup_key = %v", got)
+	}
+	payload, _ := transport.payload["payload"].(map[string]any)
+	if got := payload["severity"]; got != "critical" {
+		t.Fatalf("severity = %v", got)
 	}
 }
 

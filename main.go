@@ -254,6 +254,13 @@ func buildNotifiers(cfg NotifiersConfig) ([]Notifier, []string, error) {
 		notifiers = append(notifiers, &SlackNotifier{WebhookURL: n.WebhookURL})
 		active = append(active, "slack")
 	}
+	if n := cfg.Teams; n != nil {
+		if err := validateWebhookURL("notifiers.teams.webhook_url", n.WebhookURL); err != nil {
+			return nil, nil, err
+		}
+		notifiers = append(notifiers, &TeamsNotifier{WebhookURL: n.WebhookURL})
+		active = append(active, "teams")
+	}
 	if n := cfg.Webhook; n != nil {
 		if err := validateWebhookURL("notifiers.webhook.url", n.URL); err != nil {
 			return nil, nil, err
@@ -270,6 +277,13 @@ func buildNotifiers(cfg NotifiersConfig) ([]Notifier, []string, error) {
 		}
 		notifiers = append(notifiers, &TelegramNotifier{BotToken: n.BotToken, ChatID: n.ChatID})
 		active = append(active, "telegram")
+	}
+	if n := cfg.PagerDuty; n != nil {
+		if n.IntegrationKey == "" {
+			return nil, nil, fmt.Errorf("notifiers.pagerduty.integration_key is required")
+		}
+		notifiers = append(notifiers, &PagerDutyNotifier{IntegrationKey: n.IntegrationKey})
+		active = append(active, "pagerduty")
 	}
 	if n := cfg.Email; n != nil {
 		if err := validateEmailNotifier(n); err != nil {

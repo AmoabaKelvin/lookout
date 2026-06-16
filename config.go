@@ -78,12 +78,14 @@ type LoadAlertConfig struct {
 // Notifier sections are pointers so an absent section is nil (not configured)
 // and a present one is enabled.
 type NotifiersConfig struct {
-	GoogleChat *WebhookConfig  `yaml:"google_chat"`
-	Discord    *WebhookConfig  `yaml:"discord"`
-	Slack      *WebhookConfig  `yaml:"slack"`
-	Telegram   *TelegramConfig `yaml:"telegram"`
-	Webhook    *GenericConfig  `yaml:"webhook"`
-	Email      *EmailConfig    `yaml:"email"`
+	GoogleChat *WebhookConfig   `yaml:"google_chat"`
+	Discord    *WebhookConfig   `yaml:"discord"`
+	Slack      *WebhookConfig   `yaml:"slack"`
+	Teams      *WebhookConfig   `yaml:"teams"`
+	Telegram   *TelegramConfig  `yaml:"telegram"`
+	PagerDuty  *PagerDutyConfig `yaml:"pagerduty"`
+	Webhook    *GenericConfig   `yaml:"webhook"`
+	Email      *EmailConfig     `yaml:"email"`
 }
 
 type WebhookConfig struct {
@@ -93,6 +95,10 @@ type WebhookConfig struct {
 type TelegramConfig struct {
 	BotToken string `yaml:"bot_token"`
 	ChatID   string `yaml:"chat_id"`
+}
+
+type PagerDutyConfig struct {
+	IntegrationKey string `yaml:"integration_key"`
 }
 
 type GenericConfig struct {

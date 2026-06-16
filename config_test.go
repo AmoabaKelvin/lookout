@@ -79,6 +79,10 @@ alerts:
 notifiers:
   slack:
     webhook_url: "https://hooks.slack.com/services/X/Y/Z"
+  teams:
+    webhook_url: "https://example.webhook.office.com/team"
+  pagerduty:
+    integration_key: "pagerduty-key"
 heartbeat:
   url: "https://hc-ping.com/abc"
   interval: 45s
@@ -124,6 +128,12 @@ heartbeat:
 	}
 	if cfg.Notifiers.Slack == nil || cfg.Notifiers.Slack.WebhookURL == "" {
 		t.Errorf("slack notifier not parsed")
+	}
+	if cfg.Notifiers.Teams == nil || cfg.Notifiers.Teams.WebhookURL == "" {
+		t.Errorf("teams notifier not parsed")
+	}
+	if cfg.Notifiers.PagerDuty == nil || cfg.Notifiers.PagerDuty.IntegrationKey != "pagerduty-key" {
+		t.Errorf("pagerduty notifier not parsed: %+v", cfg.Notifiers.PagerDuty)
 	}
 	if cfg.Notifiers.Discord != nil {
 		t.Errorf("absent notifier should be nil, got %+v", cfg.Notifiers.Discord)

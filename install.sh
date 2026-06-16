@@ -110,9 +110,13 @@ notifiers:
   #   webhook_url: "https://discord.com/api/webhooks/XXX/YYY"
   # slack:
   #   webhook_url: "https://hooks.slack.com/services/XXX/YYY/ZZZ"
+  # teams:
+  #   webhook_url: "https://example.webhook.office.com/..."
   # telegram:
   #   bot_token: "123456:ABC..."
   #   chat_id: "987654321"
+  # pagerduty:
+  #   integration_key: "pagerduty-events-api-v2-key"
   # webhook:
   #   url: "https://example.com/hooks/lookout"
   # email:

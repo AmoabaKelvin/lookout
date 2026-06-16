@@ -209,6 +209,52 @@ func (s *SlackNotifier) Send(alert Alert) error {
 	})
 }
 
+type TeamsNotifier struct {
+	WebhookURL string
+}
+
+func (t *TeamsNotifier) Send(alert Alert) error {
+	v := visualFor(alert)
+	return postJSON(t.WebhookURL, map[string]any{
+		"type": "message",
+		"attachments": []map[string]any{{
+			"contentType": "application/vnd.microsoft.card.adaptive",
+			"content": map[string]any{
+				"type":    "AdaptiveCard",
+				"version": "1.4",
+				"body": []map[string]any{
+					{
+						"type":   "TextBlock",
+						"text":   v.label + " - " + alert.Title,
+						"weight": "Bolder",
+						"color":  teamsColor(alert),
+						"wrap":   true,
+					},
+					{
+						"type": "FactSet",
+						"facts": []map[string]string{
+							{"title": "Host", "value": alert.Hostname},
+							{"title": "Metric", "value": alert.Metric},
+							{"title": "Value", "value": formatValue(alert.Value, alert.Unit)},
+							{"title": "Threshold", "value": formatValue(alert.Threshold, alert.Unit)},
+						},
+					},
+				},
+			},
+		}},
+	})
+}
+
+func teamsColor(alert Alert) string {
+	if !alert.IsFiring {
+		return "Good"
+	}
+	if alert.Severity == SeverityCritical {
+		return "Attention"
+	}
+	return "Warning"
+}
+
 type TelegramNotifier struct {
 	BotToken string
 	ChatID   string
@@ -222,6 +268,52 @@ func (t *TelegramNotifier) Send(alert Alert) error {
 	})
 }
 
+type PagerDutyNotifier struct {
+	IntegrationKey string
+}
+
+func (p *PagerDutyNotifier) Send(alert Alert) error {
+	action := "trigger"
+	if !alert.IsFiring {
+		action = "resolve"
+	}
+
+	return postJSON("https://events.pagerduty.com/v2/enqueue", map[string]any{
+		"routing_key":  p.IntegrationKey,
+		"event_action": action,
+		"dedup_key":    alert.Hostname + ":" + alert.Metric,
+		"payload": map[string]any{
+			"summary":   alert.Title + " on " + alert.Hostname,
+			"source":    alert.Hostname,
+			"severity":  pagerDutySeverity(alert),
+			"component": alert.Metric,
+			"group":     "lookout",
+			"class":     alert.Unit,
+			"custom_details": map[string]any{
+				"metric":    alert.Metric,
+				"value":     alert.Value,
+				"threshold": alert.Threshold,
+				"unit":      alert.Unit,
+				"status":    alertStatus(alert),
+			},
+		},
+	})
+}
+
+func pagerDutySeverity(alert Alert) string {
+	if alert.Severity == SeverityCritical {
+		return "critical"
+	}
+	return "warning"
+}
+
+func alertStatus(alert Alert) string {
+	if alert.IsFiring {
+		return "firing"
+	}
+	return "resolved"
+}
+
 type GenericWebhookNotifier struct {
 	WebhookURL string
 }
@@ -229,12 +321,8 @@ type GenericWebhookNotifier struct {
 // GenericWebhookNotifier POSTs all alert fields as structured JSON for custom integrations.
 func (g *GenericWebhookNotifier) Send(alert Alert) error {
 	v := visualFor(alert)
-	status := "firing"
-	if !alert.IsFiring {
-		status = "resolved"
-	}
 	return postJSON(g.WebhookURL, map[string]any{
-		"status":    status,
+		"status":    alertStatus(alert),
 		"severity":  string(alert.Severity),
 		"title":     alert.Title,
 		"metric":    alert.Metric,
