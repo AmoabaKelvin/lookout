@@ -104,7 +104,6 @@ func main() {
 				if !ok {
 					return
 				}
-				fmt.Printf("  metric: %s = %.2f %s\n", metric.Name, metric.Value, metric.Unit)
 				alertManager.Evaluate(metric)
 
 			case dockerEvent, ok := <-dockerEventsChannel:
