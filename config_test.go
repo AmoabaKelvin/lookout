@@ -40,6 +40,12 @@ func TestLoadConfigDefaults(t *testing.T) {
 	if cfg.Alerts.Disk.For.Std() != 2*time.Minute {
 		t.Errorf("disk for: got %s", cfg.Alerts.Disk.For.Std())
 	}
+	if cfg.Alerts.Load.Threshold != 4 {
+		t.Errorf("load threshold: got %v", cfg.Alerts.Load.Threshold)
+	}
+	if cfg.Alerts.Load.ResolveBelow == nil || *cfg.Alerts.Load.ResolveBelow != 3 {
+		t.Errorf("load resolve below: got %v", cfg.Alerts.Load.ResolveBelow)
+	}
 	if len(cfg.Alerts.Disk.Mounts) == 0 {
 		t.Errorf("expected default mounts")
 	}
@@ -61,6 +67,11 @@ alerts:
     mounts:
       - /
       - /data
+  load:
+    threshold: 8
+    resolve_below: 6
+    for: 1m
+    severity: critical
 notifiers:
   slack:
     webhook_url: "https://hooks.slack.com/services/X/Y/Z"
@@ -94,6 +105,15 @@ heartbeat:
 	}
 	if got := cfg.Alerts.Disk.Mounts; len(got) != 2 || got[1] != "/data" {
 		t.Errorf("mounts override: got %v", got)
+	}
+	if cfg.Alerts.Load.Threshold != 8 || cfg.Alerts.Load.For.Std() != time.Minute {
+		t.Errorf("load overrides not applied: %+v", cfg.Alerts.Load)
+	}
+	if cfg.Alerts.Load.ResolveBelow == nil || *cfg.Alerts.Load.ResolveBelow != 6 {
+		t.Errorf("load resolve below override: got %v", cfg.Alerts.Load.ResolveBelow)
+	}
+	if cfg.Alerts.Load.Severity != SeverityCritical {
+		t.Errorf("load severity override: got %s", cfg.Alerts.Load.Severity)
 	}
 	if cfg.Notifiers.Slack == nil || cfg.Notifiers.Slack.WebhookURL == "" {
 		t.Errorf("slack notifier not parsed")
@@ -151,6 +171,9 @@ alerts:
     threshold: 250
   disk:
     severity: bogus
+  load:
+    threshold: 0
+    severity: bogus
 `))
 	if err != nil {
 		t.Fatal(err)
@@ -164,6 +187,12 @@ alerts:
 	if cfg.Alerts.Disk.Severity != SeverityWarning {
 		t.Errorf("invalid severity should fall back, got %s", cfg.Alerts.Disk.Severity)
 	}
+	if cfg.Alerts.Load.Threshold != 4 {
+		t.Errorf("non-positive load threshold should fall back, got %v", cfg.Alerts.Load.Threshold)
+	}
+	if cfg.Alerts.Load.Severity != SeverityWarning {
+		t.Errorf("invalid load severity should fall back, got %s", cfg.Alerts.Load.Severity)
+	}
 }
 
 func TestLoadConfigResolveBelowDefaultsAndValidation(t *testing.T) {
@@ -174,6 +203,8 @@ alerts:
   disk:
     threshold: 3
     resolve_below: 4
+  load:
+    threshold: 8
 `))
 	if err != nil {
 		t.Fatal(err)
@@ -183,6 +214,9 @@ alerts:
 	}
 	if cfg.Alerts.Disk.ResolveBelow == nil || *cfg.Alerts.Disk.ResolveBelow != 0 {
 		t.Errorf("resolve_below above threshold should fall back to threshold-5 clamped at 0, got %v", cfg.Alerts.Disk.ResolveBelow)
+	}
+	if cfg.Alerts.Load.ResolveBelow == nil || *cfg.Alerts.Load.ResolveBelow != 7 {
+		t.Errorf("missing load resolve_below should default to threshold-1, got %v", cfg.Alerts.Load.ResolveBelow)
 	}
 }
 

@@ -94,6 +94,11 @@ alerts:
       - /home
       - /var
       - /boot
+  load:
+    threshold: 4
+    resolve_below: 3
+    for: 2m
+    severity: warning
 
 # Alerts fan out to every notifier you configure. Uncomment the ones you want,
 # then restart the service.

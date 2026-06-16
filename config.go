@@ -41,10 +41,11 @@ type Config struct {
 }
 
 type AlertsConfig struct {
-	RenotifyAfter Duration     `yaml:"renotify_after"`
-	StaleAfter    Duration     `yaml:"stale_after"`
-	Memory        MemoryConfig `yaml:"memory"`
-	Disk          DiskConfig   `yaml:"disk"`
+	RenotifyAfter Duration        `yaml:"renotify_after"`
+	StaleAfter    Duration        `yaml:"stale_after"`
+	Memory        MemoryConfig    `yaml:"memory"`
+	Disk          DiskConfig      `yaml:"disk"`
+	Load          LoadAlertConfig `yaml:"load"`
 }
 
 type MemoryConfig struct {
@@ -62,6 +63,14 @@ type DiskConfig struct {
 	Severity     Severity `yaml:"severity"`
 	Source       string   `yaml:"source"`
 	Mounts       []string `yaml:"mounts"`
+}
+
+type LoadAlertConfig struct {
+	Threshold    float64  `yaml:"threshold"`
+	ResolveBelow *float64 `yaml:"resolve_below"`
+	For          Duration `yaml:"for"`
+	Severity     Severity `yaml:"severity"`
+	Source       string   `yaml:"source"`
 }
 
 // Notifier sections are pointers so an absent section is nil (not configured)
@@ -124,6 +133,12 @@ func defaultConfig() Config {
 				Source:    "/proc/mounts",
 				Mounts:    []string{"/", "/home", "/var", "/boot"},
 			},
+			Load: LoadAlertConfig{
+				Threshold: 4,
+				For:       Duration(2 * time.Minute),
+				Severity:  SeverityWarning,
+				Source:    "/proc/loadavg",
+			},
 		},
 		Heartbeat: HeartbeatConfig{Interval: Duration(60 * time.Second)},
 		Docker:    DockerConfig{Enabled: false},
@@ -163,14 +178,18 @@ func (c *Config) validate() {
 
 	clampThreshold(&c.Alerts.Memory.Threshold, "alerts.memory.threshold")
 	clampThreshold(&c.Alerts.Disk.Threshold, "alerts.disk.threshold")
-	c.Alerts.Memory.ResolveBelow = normalizedResolveBelow(c.Alerts.Memory.ResolveBelow, c.Alerts.Memory.Threshold, "alerts.memory.resolve_below")
-	c.Alerts.Disk.ResolveBelow = normalizedResolveBelow(c.Alerts.Disk.ResolveBelow, c.Alerts.Disk.Threshold, "alerts.disk.resolve_below")
+	clampPositiveFloat(&c.Alerts.Load.Threshold, 4, "alerts.load.threshold")
+	c.Alerts.Memory.ResolveBelow = normalizedResolveBelow(c.Alerts.Memory.ResolveBelow, c.Alerts.Memory.Threshold, 5, "alerts.memory.resolve_below")
+	c.Alerts.Disk.ResolveBelow = normalizedResolveBelow(c.Alerts.Disk.ResolveBelow, c.Alerts.Disk.Threshold, 5, "alerts.disk.resolve_below")
+	c.Alerts.Load.ResolveBelow = normalizedResolveBelow(c.Alerts.Load.ResolveBelow, c.Alerts.Load.Threshold, 1, "alerts.load.resolve_below")
 
 	clampFor(&c.Alerts.Memory.For, "alerts.memory.for")
 	clampFor(&c.Alerts.Disk.For, "alerts.disk.for")
+	clampFor(&c.Alerts.Load.For, "alerts.load.for")
 
 	clampSeverity(&c.Alerts.Memory.Severity, SeverityCritical, "alerts.memory.severity")
 	clampSeverity(&c.Alerts.Disk.Severity, SeverityWarning, "alerts.disk.severity")
+	clampSeverity(&c.Alerts.Load.Severity, SeverityWarning, "alerts.load.severity")
 }
 
 func clampInterval(d *Duration, fallback time.Duration, name string) {
@@ -186,8 +205,8 @@ func defaultStaleAfter(d *Duration, fallback time.Duration) {
 	}
 }
 
-func defaultResolveBelow(threshold float64) float64 {
-	resolveBelow := threshold - 5
+func defaultResolveBelow(threshold float64, margin float64) float64 {
+	resolveBelow := threshold - margin
 	if resolveBelow < 0 {
 		return 0
 	}
@@ -207,8 +226,15 @@ func clampThreshold(v *float64, name string) {
 	}
 }
 
-func normalizedResolveBelow(v *float64, threshold float64, name string) *float64 {
-	fallback := defaultResolveBelow(threshold)
+func clampPositiveFloat(v *float64, fallback float64, name string) {
+	if *v <= 0 {
+		log.Printf("config: %s must be positive; using %.0f", name, fallback)
+		*v = fallback
+	}
+}
+
+func normalizedResolveBelow(v *float64, threshold float64, margin float64, name string) *float64 {
+	fallback := defaultResolveBelow(threshold, margin)
 	if v == nil {
 		return &fallback
 	}

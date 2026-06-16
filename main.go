@@ -65,6 +65,15 @@ func main() {
 			Severity:     cfg.Alerts.Disk.Severity,
 			For:          cfg.Alerts.Disk.For.Std(),
 		},
+		{
+			ID:           "load",
+			Matcher:      func(s MetricSample) bool { return s.Name == "load.1" },
+			Threshold:    cfg.Alerts.Load.Threshold,
+			ResolveBelow: *cfg.Alerts.Load.ResolveBelow,
+			Message:      "High 1-minute load average",
+			Severity:     cfg.Alerts.Load.Severity,
+			For:          cfg.Alerts.Load.For.Std(),
+		},
 	}
 
 	alertManager := NewAlertManager(rules, cfg.Alerts.RenotifyAfter.Std(), cfg.Hostname, []Notifier{notifierQueue})
@@ -167,6 +176,15 @@ func main() {
 			}
 		}
 
+		loadData, err := loadCollector(cfg.Alerts.Load.Source)
+		if err != nil {
+			fmt.Printf("Error collecting load info: %v\n", err)
+		} else {
+			for _, d := range loadData {
+				evaluatorEvents <- evaluatorEvent{sample: d, hasSample: true}
+			}
+		}
+
 		evaluatorEvents <- evaluatorEvent{checkStale: true}
 	}
 
@@ -188,6 +206,7 @@ func main() {
 func trackedMetrics(cfg Config) []TrackedMetric {
 	tracked := []TrackedMetric{
 		{RuleID: "memory", Name: "memory.used_percent"},
+		{RuleID: "load", Name: "load.1"},
 	}
 	for _, mount := range cfg.Alerts.Disk.Mounts {
 		tracked = append(tracked, TrackedMetric{
