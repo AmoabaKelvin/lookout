@@ -49,6 +49,24 @@ func TestLoadConfigDefaults(t *testing.T) {
 	if cfg.Alerts.Load.ResolveBelow == nil || *cfg.Alerts.Load.ResolveBelow != 3 {
 		t.Errorf("load resolve below: got %v", cfg.Alerts.Load.ResolveBelow)
 	}
+	if cfg.Alerts.CPU.Threshold != 85 {
+		t.Errorf("cpu threshold: got %v", cfg.Alerts.CPU.Threshold)
+	}
+	if cfg.Alerts.CPU.ResolveBelow == nil || *cfg.Alerts.CPU.ResolveBelow != 80 {
+		t.Errorf("cpu resolve below: got %v", cfg.Alerts.CPU.ResolveBelow)
+	}
+	if cfg.Alerts.Systemd.Severity != SeverityCritical {
+		t.Errorf("systemd severity: got %s", cfg.Alerts.Systemd.Severity)
+	}
+	if cfg.Alerts.HTTP.Severity != SeverityCritical {
+		t.Errorf("http severity: got %s", cfg.Alerts.HTTP.Severity)
+	}
+	if cfg.Docker.Severity != SeverityCritical {
+		t.Errorf("docker severity: got %s", cfg.Docker.Severity)
+	}
+	if cfg.Docker.RestartThreshold != 3 || cfg.Docker.RestartWindow.Std() != 10*time.Minute {
+		t.Errorf("docker restart defaults: %+v", cfg.Docker)
+	}
 	if len(cfg.Alerts.Disk.Mounts) == 0 {
 		t.Errorf("expected default mounts")
 	}
@@ -76,6 +94,22 @@ alerts:
     resolve_below: 6
     for: 1m
     severity: critical
+  cpu:
+    threshold: 75
+    resolve_below: 65
+    for: 45s
+    severity: critical
+  systemd:
+    services:
+      - nginx
+    severity: warning
+  http:
+    severity: warning
+    checks:
+      - name: app
+        url: "https://example.com/health"
+        timeout: 3s
+        expected_status: 204
 notifiers:
   slack:
     webhook_url: "https://hooks.slack.com/services/X/Y/Z"
@@ -86,6 +120,11 @@ notifiers:
 heartbeat:
   url: "https://hc-ping.com/abc"
   interval: 45s
+docker:
+  enabled: true
+  severity: warning
+  restart_threshold: 5
+  restart_window: 3m
 `))
 	if err != nil {
 		t.Fatal(err)
@@ -126,6 +165,21 @@ heartbeat:
 	if cfg.Alerts.Load.Severity != SeverityCritical {
 		t.Errorf("load severity override: got %s", cfg.Alerts.Load.Severity)
 	}
+	if cfg.Alerts.CPU.Threshold != 75 || cfg.Alerts.CPU.For.Std() != 45*time.Second {
+		t.Errorf("cpu overrides not applied: %+v", cfg.Alerts.CPU)
+	}
+	if cfg.Alerts.CPU.ResolveBelow == nil || *cfg.Alerts.CPU.ResolveBelow != 65 {
+		t.Errorf("cpu resolve below override: got %v", cfg.Alerts.CPU.ResolveBelow)
+	}
+	if cfg.Alerts.CPU.Severity != SeverityCritical {
+		t.Errorf("cpu severity override: got %s", cfg.Alerts.CPU.Severity)
+	}
+	if len(cfg.Alerts.Systemd.Services) != 1 || cfg.Alerts.Systemd.Services[0] != "nginx" || cfg.Alerts.Systemd.Severity != SeverityWarning {
+		t.Errorf("systemd overrides not applied: %+v", cfg.Alerts.Systemd)
+	}
+	if len(cfg.Alerts.HTTP.Checks) != 1 || cfg.Alerts.HTTP.Checks[0].Name != "app" || cfg.Alerts.HTTP.Checks[0].ExpectedStatus != 204 || cfg.Alerts.HTTP.Checks[0].Timeout.Std() != 3*time.Second {
+		t.Errorf("http overrides not applied: %+v", cfg.Alerts.HTTP)
+	}
 	if cfg.Notifiers.Slack == nil || cfg.Notifiers.Slack.WebhookURL == "" {
 		t.Errorf("slack notifier not parsed")
 	}
@@ -137,6 +191,9 @@ heartbeat:
 	}
 	if cfg.Notifiers.Discord != nil {
 		t.Errorf("absent notifier should be nil, got %+v", cfg.Notifiers.Discord)
+	}
+	if !cfg.Docker.Enabled || cfg.Docker.Severity != SeverityWarning || cfg.Docker.RestartThreshold != 5 || cfg.Docker.RestartWindow.Std() != 3*time.Minute {
+		t.Errorf("docker overrides not applied: %+v", cfg.Docker)
 	}
 }
 
@@ -191,6 +248,20 @@ alerts:
   load:
     threshold: 0
     severity: bogus
+  cpu:
+    threshold: -1
+    severity: bogus
+  systemd:
+    severity: bogus
+  http:
+    severity: bogus
+    checks:
+      - name: app
+        url: "https://example.com"
+docker:
+  severity: bogus
+  restart_threshold: 0
+  restart_window: 0s
 `))
 	if err != nil {
 		t.Fatal(err)
@@ -210,6 +281,27 @@ alerts:
 	if cfg.Alerts.Load.Severity != SeverityWarning {
 		t.Errorf("invalid load severity should fall back, got %s", cfg.Alerts.Load.Severity)
 	}
+	if cfg.Alerts.CPU.Threshold != 0 {
+		t.Errorf("negative cpu threshold should clamp to 0, got %v", cfg.Alerts.CPU.Threshold)
+	}
+	if cfg.Alerts.CPU.Severity != SeverityWarning {
+		t.Errorf("invalid cpu severity should fall back, got %s", cfg.Alerts.CPU.Severity)
+	}
+	if cfg.Alerts.Systemd.Severity != SeverityCritical {
+		t.Errorf("invalid systemd severity should fall back, got %s", cfg.Alerts.Systemd.Severity)
+	}
+	if cfg.Alerts.HTTP.Severity != SeverityCritical {
+		t.Errorf("invalid http severity should fall back, got %s", cfg.Alerts.HTTP.Severity)
+	}
+	if cfg.Alerts.HTTP.Checks[0].Timeout.Std() != 5*time.Second || cfg.Alerts.HTTP.Checks[0].ExpectedStatus != 200 {
+		t.Errorf("http check defaults not applied: %+v", cfg.Alerts.HTTP.Checks[0])
+	}
+	if cfg.Docker.Severity != SeverityCritical {
+		t.Errorf("invalid docker severity should fall back, got %s", cfg.Docker.Severity)
+	}
+	if cfg.Docker.RestartThreshold != 3 || cfg.Docker.RestartWindow.Std() != 10*time.Minute {
+		t.Errorf("invalid docker restart settings should fall back, got %+v", cfg.Docker)
+	}
 }
 
 func TestLoadConfigResolveBelowDefaultsAndValidation(t *testing.T) {
@@ -222,6 +314,8 @@ alerts:
     resolve_below: 4
   load:
     threshold: 8
+  cpu:
+    threshold: 70
 `))
 	if err != nil {
 		t.Fatal(err)
@@ -234,6 +328,9 @@ alerts:
 	}
 	if cfg.Alerts.Load.ResolveBelow == nil || *cfg.Alerts.Load.ResolveBelow != 7 {
 		t.Errorf("missing load resolve_below should default to threshold-1, got %v", cfg.Alerts.Load.ResolveBelow)
+	}
+	if cfg.Alerts.CPU.ResolveBelow == nil || *cfg.Alerts.CPU.ResolveBelow != 65 {
+		t.Errorf("missing cpu resolve_below should default to threshold-5, got %v", cfg.Alerts.CPU.ResolveBelow)
 	}
 }
 

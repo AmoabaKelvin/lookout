@@ -48,6 +48,9 @@ type AlertsConfig struct {
 	Memory        MemoryConfig    `yaml:"memory"`
 	Disk          DiskConfig      `yaml:"disk"`
 	Load          LoadAlertConfig `yaml:"load"`
+	CPU           CPUConfig       `yaml:"cpu"`
+	Systemd       SystemdConfig   `yaml:"systemd"`
+	HTTP          HTTPConfig      `yaml:"http"`
 }
 
 type MemoryConfig struct {
@@ -73,6 +76,31 @@ type LoadAlertConfig struct {
 	For          Duration `yaml:"for"`
 	Severity     Severity `yaml:"severity"`
 	Source       string   `yaml:"source"`
+}
+
+type CPUConfig struct {
+	Threshold    float64  `yaml:"threshold"`
+	ResolveBelow *float64 `yaml:"resolve_below"`
+	For          Duration `yaml:"for"`
+	Severity     Severity `yaml:"severity"`
+	Source       string   `yaml:"source"`
+}
+
+type SystemdConfig struct {
+	Services []string `yaml:"services"`
+	Severity Severity `yaml:"severity"`
+}
+
+type HTTPConfig struct {
+	Checks   []HTTPCheckConfig `yaml:"checks"`
+	Severity Severity          `yaml:"severity"`
+}
+
+type HTTPCheckConfig struct {
+	Name           string   `yaml:"name"`
+	URL            string   `yaml:"url"`
+	Timeout        Duration `yaml:"timeout"`
+	ExpectedStatus int      `yaml:"expected_status"`
 }
 
 // Notifier sections are pointers so an absent section is nil (not configured)
@@ -121,7 +149,10 @@ type HeartbeatConfig struct {
 }
 
 type DockerConfig struct {
-	Enabled bool `yaml:"enabled"`
+	Enabled          bool     `yaml:"enabled"`
+	Severity         Severity `yaml:"severity"`
+	RestartThreshold int      `yaml:"restart_threshold"`
+	RestartWindow    Duration `yaml:"restart_window"`
 }
 
 func defaultConfig() Config {
@@ -149,9 +180,22 @@ func defaultConfig() Config {
 				Severity:  SeverityWarning,
 				Source:    "/proc/loadavg",
 			},
+			CPU: CPUConfig{
+				Threshold: 85,
+				For:       Duration(2 * time.Minute),
+				Severity:  SeverityWarning,
+				Source:    "/proc/stat",
+			},
+			Systemd: SystemdConfig{Severity: SeverityCritical},
+			HTTP:    HTTPConfig{Severity: SeverityCritical},
 		},
 		Heartbeat: HeartbeatConfig{Interval: Duration(60 * time.Second)},
-		Docker:    DockerConfig{Enabled: false},
+		Docker: DockerConfig{
+			Enabled:          false,
+			Severity:         SeverityCritical,
+			RestartThreshold: 3,
+			RestartWindow:    Duration(10 * time.Minute),
+		},
 	}
 }
 
@@ -189,18 +233,36 @@ func (c *Config) validate() {
 
 	clampThreshold(&c.Alerts.Memory.Threshold, "alerts.memory.threshold")
 	clampThreshold(&c.Alerts.Disk.Threshold, "alerts.disk.threshold")
+	clampThreshold(&c.Alerts.CPU.Threshold, "alerts.cpu.threshold")
 	clampPositiveFloat(&c.Alerts.Load.Threshold, 4, "alerts.load.threshold")
 	c.Alerts.Memory.ResolveBelow = normalizedResolveBelow(c.Alerts.Memory.ResolveBelow, c.Alerts.Memory.Threshold, 5, "alerts.memory.resolve_below")
 	c.Alerts.Disk.ResolveBelow = normalizedResolveBelow(c.Alerts.Disk.ResolveBelow, c.Alerts.Disk.Threshold, 5, "alerts.disk.resolve_below")
+	c.Alerts.CPU.ResolveBelow = normalizedResolveBelow(c.Alerts.CPU.ResolveBelow, c.Alerts.CPU.Threshold, 5, "alerts.cpu.resolve_below")
 	c.Alerts.Load.ResolveBelow = normalizedResolveBelow(c.Alerts.Load.ResolveBelow, c.Alerts.Load.Threshold, 1, "alerts.load.resolve_below")
 
 	clampFor(&c.Alerts.Memory.For, "alerts.memory.for")
 	clampFor(&c.Alerts.Disk.For, "alerts.disk.for")
 	clampFor(&c.Alerts.Load.For, "alerts.load.for")
+	clampFor(&c.Alerts.CPU.For, "alerts.cpu.for")
 
 	clampSeverity(&c.Alerts.Memory.Severity, SeverityCritical, "alerts.memory.severity")
 	clampSeverity(&c.Alerts.Disk.Severity, SeverityWarning, "alerts.disk.severity")
 	clampSeverity(&c.Alerts.Load.Severity, SeverityWarning, "alerts.load.severity")
+	clampSeverity(&c.Alerts.CPU.Severity, SeverityWarning, "alerts.cpu.severity")
+	clampSeverity(&c.Alerts.Systemd.Severity, SeverityCritical, "alerts.systemd.severity")
+	clampSeverity(&c.Alerts.HTTP.Severity, SeverityCritical, "alerts.http.severity")
+	clampSeverity(&c.Docker.Severity, SeverityCritical, "docker.severity")
+	clampPositiveInt(&c.Docker.RestartThreshold, 3, "docker.restart_threshold")
+	clampInterval(&c.Docker.RestartWindow, 10*time.Minute, "docker.restart_window")
+
+	for i := range c.Alerts.HTTP.Checks {
+		if c.Alerts.HTTP.Checks[i].Timeout.Std() <= 0 {
+			c.Alerts.HTTP.Checks[i].Timeout = Duration(5 * time.Second)
+		}
+		if c.Alerts.HTTP.Checks[i].ExpectedStatus == 0 {
+			c.Alerts.HTTP.Checks[i].ExpectedStatus = 200
+		}
+	}
 }
 
 func defaultString(s *string, fallback string) {
@@ -246,6 +308,13 @@ func clampThreshold(v *float64, name string) {
 func clampPositiveFloat(v *float64, fallback float64, name string) {
 	if *v <= 0 {
 		log.Printf("config: %s must be positive; using %.0f", name, fallback)
+		*v = fallback
+	}
+}
+
+func clampPositiveInt(v *int, fallback int, name string) {
+	if *v <= 0 {
+		log.Printf("config: %s must be positive; using %d", name, fallback)
 		*v = fallback
 	}
 }

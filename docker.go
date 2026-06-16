@@ -2,10 +2,14 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"os"
+	"path/filepath"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/moby/moby/api/types/events"
@@ -19,6 +23,16 @@ type DockerEvent struct {
 	Attributes map[string]string
 }
 
+type dockerEvaluation struct {
+	ID   string
+	Kind string
+}
+
+type dockerSnapshot struct {
+	Running bool
+	Health  string
+}
+
 type State string
 
 const (
@@ -30,17 +44,35 @@ const (
 )
 
 type ContainerState struct {
-	ID         string
-	Name       string
-	Image      string
-	State      State
-	LastOOMAt  time.Time
-	LastExit   int
-	LastStopAt time.Time
-	LastDieAt  time.Time
-	PendingDie bool
-	StartedAt  time.Time
-	DieTimes   []time.Time
+	ID              string
+	Name            string
+	Image           string
+	State           State
+	LastOOMAt       time.Time
+	LastExit        int
+	LastStopAt      time.Time
+	LastDieAt       time.Time
+	PendingDie      bool
+	StartedAt       time.Time
+	DieTimes        []time.Time
+	StartTimes      []time.Time
+	IsAlerting      bool
+	RestartAlerting bool
+	HealthAlerting  bool
+}
+
+type storedDockerState struct {
+	Containers []storedContainerState `json:"containers"`
+}
+
+type storedContainerState struct {
+	ID              string `json:"id"`
+	Name            string `json:"name,omitempty"`
+	Image           string `json:"image,omitempty"`
+	LastExit        int    `json:"last_exit,omitempty"`
+	IsAlerting      bool   `json:"is_alerting"`
+	RestartAlerting bool   `json:"restart_alerting,omitempty"`
+	HealthAlerting  bool   `json:"health_alerting,omitempty"`
 }
 
 func dockerCollector(cli *client.Client, ctx context.Context, dockerEventsChannel chan<- DockerEvent) {
@@ -65,6 +97,35 @@ func dockerCollector(cli *client.Client, ctx context.Context, dockerEventsChanne
 	}
 }
 
+func dockerContainerSnapshots(ctx context.Context, cli *client.Client, containers map[string]*ContainerState) (map[string]dockerSnapshot, error) {
+	result, err := cli.ContainerList(ctx, client.ContainerListOptions{All: true})
+	if err != nil {
+		return nil, err
+	}
+
+	snapshots := make(map[string]dockerSnapshot, len(result.Items))
+	for _, container := range result.Items {
+		snapshots[container.ID] = dockerSnapshot{Running: string(container.State) == string(Running)}
+	}
+
+	for id, container := range containers {
+		if !container.HealthAlerting {
+			continue
+		}
+		snapshot, ok := snapshots[id]
+		if !ok {
+			continue
+		}
+		inspect, err := cli.ContainerInspect(ctx, id, client.ContainerInspectOptions{})
+		if err != nil || inspect.Container.State == nil || inspect.Container.State.Health == nil {
+			continue
+		}
+		snapshot.Health = string(inspect.Container.State.Health.Status)
+		snapshots[id] = snapshot
+	}
+	return snapshots, nil
+}
+
 func listenDockerEvents(cli *client.Client, ctx context.Context, f client.Filters, since time.Time, dockerEventsChannel chan<- DockerEvent) (time.Time, error) {
 	options := client.EventsListOptions{Filters: f}
 	if !since.IsZero() {
@@ -85,7 +146,7 @@ func listenDockerEvents(cli *client.Client, ctx context.Context, f client.Filter
 
 			eventTime := dockerMessageTime(event)
 			if !eventTime.IsZero() {
-				if skipDockerReplayEvent(since, eventTime) {
+				if !since.IsZero() && !eventTime.After(since) {
 					continue
 				}
 				if eventTime.After(latest) {
@@ -101,7 +162,7 @@ func listenDockerEvents(cli *client.Client, ctx context.Context, f client.Filter
 			fmt.Printf("[docker] [%s] %s\n", timestamp, name)
 
 			switch event.Action {
-			case events.ActionDie, events.ActionOOM, events.ActionRestart, events.ActionStart, events.ActionStop:
+			case events.ActionDie, events.ActionDestroy, events.ActionHealthStatusHealthy, events.ActionHealthStatusUnhealthy, events.ActionOOM, events.ActionRemove, events.ActionRestart, events.ActionStart, events.ActionStop:
 				dockerEventsChannel <- DockerEvent{
 					ID:         event.Actor.ID,
 					Timestamp:  eventTime,
@@ -130,16 +191,131 @@ func dockerMessageTime(event events.Message) time.Time {
 }
 
 func dockerEventSince(t time.Time) string {
-	return fmt.Sprintf("%d.%09d", t.Unix(), t.Nanosecond())
+	return t.Format("2006-01-02T15:04:05.999999999Z07:00")
 }
 
-func skipDockerReplayEvent(since time.Time, eventTime time.Time) bool {
-	return !since.IsZero() && !eventTime.IsZero() && !eventTime.After(since)
+func dockerStatePath(stateFile string) string {
+	if stateFile == "" {
+		return ""
+	}
+	return filepath.Join(filepath.Dir(stateFile), "docker-state.json")
+}
+
+func loadDockerState(path string) (map[string]*ContainerState, error) {
+	containers := make(map[string]*ContainerState)
+	if path == "" {
+		return containers, nil
+	}
+
+	data, err := os.ReadFile(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return containers, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+
+	var stored storedDockerState
+	if err := json.Unmarshal(data, &stored); err != nil {
+		return nil, err
+	}
+	for _, c := range stored.Containers {
+		if c.ID == "" || (!c.IsAlerting && !c.RestartAlerting && !c.HealthAlerting) {
+			continue
+		}
+		containers[c.ID] = &ContainerState{
+			ID:              c.ID,
+			Name:            c.Name,
+			Image:           c.Image,
+			LastExit:        c.LastExit,
+			IsAlerting:      c.IsAlerting,
+			RestartAlerting: c.RestartAlerting,
+			HealthAlerting:  c.HealthAlerting,
+		}
+	}
+	return containers, nil
+}
+
+func saveDockerState(path string, containers map[string]*ContainerState) error {
+	if path == "" {
+		return nil
+	}
+
+	stored := storedDockerState{Containers: []storedContainerState{}}
+	for _, c := range containers {
+		if !c.IsAlerting && !c.RestartAlerting && !c.HealthAlerting {
+			continue
+		}
+		stored.Containers = append(stored.Containers, storedContainerState{
+			ID:              c.ID,
+			Name:            c.Name,
+			Image:           c.Image,
+			LastExit:        c.LastExit,
+			IsAlerting:      c.IsAlerting,
+			RestartAlerting: c.RestartAlerting,
+			HealthAlerting:  c.HealthAlerting,
+		})
+	}
+
+	data, err := json.MarshalIndent(stored, "", "  ")
+	if err != nil {
+		return err
+	}
+	data = append(data, '\n')
+
+	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return err
+	}
+	tmp, err := os.CreateTemp(dir, ".docker-state-*.tmp")
+	if err != nil {
+		return err
+	}
+	tmpName := tmp.Name()
+	defer os.Remove(tmpName)
+
+	if _, err := tmp.Write(data); err != nil {
+		tmp.Close()
+		return err
+	}
+	if err := tmp.Chmod(0o600); err != nil {
+		tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	return os.Rename(tmpName, path)
+}
+
+func reconcileDockerAlerts(containers map[string]*ContainerState, snapshots map[string]dockerSnapshot, hostname string, cfg DockerConfig) []Alert {
+	var alerts []Alert
+	for id, container := range containers {
+		snapshot, exists := snapshots[id]
+		if !exists {
+			alerts = append(alerts, dockerRemovalAlerts(container, hostname, cfg.Severity, cfg.RestartThreshold)...)
+			delete(containers, id)
+			continue
+		}
+		if container.IsAlerting && snapshot.Running {
+			container.IsAlerting = false
+			alerts = append(alerts, *dockerExitAlert(container, hostname, cfg.Severity, false, "Container running"))
+		}
+		if container.RestartAlerting {
+			container.RestartAlerting = false
+			alerts = append(alerts, *dockerRestartAlert(container, hostname, cfg.Severity, false, cfg.RestartThreshold))
+		}
+		if container.HealthAlerting && snapshot.Health != "unhealthy" {
+			container.HealthAlerting = false
+			alerts = append(alerts, *dockerHealthAlert(container, hostname, cfg.Severity, false))
+		}
+	}
+	return alerts
 }
 
 // handleDockerEvent updates container state from one event. A die is debounced
 // via evalCh so a quick restart can cancel the pending failure evaluation.
-func handleDockerEvent(containers map[string]*ContainerState, dockerEvent DockerEvent, evalCh chan<- string) {
+func handleDockerEvent(containers map[string]*ContainerState, dockerEvent DockerEvent, evalCh chan<- dockerEvaluation, hostname string, cfg DockerConfig) []Alert {
 	container := containers[dockerEvent.ID]
 	if container == nil {
 		container = &ContainerState{
@@ -159,11 +335,32 @@ func handleDockerEvent(containers map[string]*ContainerState, dockerEvent Docker
 	case "start", "restart":
 		container.State = Running
 		container.StartedAt = dockerEvent.Timestamp
+		container.StartTimes = appendRecentTimes(container.StartTimes, dockerEvent.Timestamp, cfg.RestartWindow.Std())
 
 		if container.PendingDie && container.LastDieAt.Before(container.StartedAt) {
 			container.PendingDie = false
-			// TODO: evaluate the restart loop here
 		}
+		if container.IsAlerting {
+			container.IsAlerting = false
+			return []Alert{*dockerExitAlert(container, hostname, cfg.Severity, false, "Container running")}
+		}
+		if len(container.StartTimes) >= cfg.RestartThreshold && !container.RestartAlerting {
+			container.RestartAlerting = true
+			id := dockerEvent.ID
+			window := cfg.RestartWindow.Std()
+			time.AfterFunc(window, func() {
+				evalCh <- dockerEvaluation{ID: id, Kind: "restart"}
+			})
+			return []Alert{*dockerRestartAlert(container, hostname, cfg.Severity, true, cfg.RestartThreshold)}
+		}
+	case "destroy", "remove":
+		container.State = Removed
+		alerts := dockerRemovalAlerts(container, hostname, cfg.Severity, cfg.RestartThreshold)
+		if container.IsAlerting {
+			container.IsAlerting = false
+		}
+		delete(containers, dockerEvent.ID)
+		return alerts
 	case "die":
 		container.State = Exited
 		if code, err := strconv.Atoi(dockerEvent.Attributes["exitCode"]); err == nil {
@@ -175,31 +372,152 @@ func handleDockerEvent(containers map[string]*ContainerState, dockerEvent Docker
 
 		id := dockerEvent.ID
 		time.AfterFunc(1500*time.Millisecond, func() {
-			evalCh <- id
+			evalCh <- dockerEvaluation{ID: id, Kind: "die"}
 		})
 	case "stop":
 		container.LastStopAt = dockerEvent.Timestamp
 	case "oom":
 		container.LastOOMAt = dockerEvent.Timestamp
-		// TODO: proper OOM alert
-		fmt.Printf("The container %s was killed because of an OOM", container.ID)
+	case string(events.ActionHealthStatusUnhealthy):
+		if !container.HealthAlerting {
+			container.HealthAlerting = true
+			return []Alert{*dockerHealthAlert(container, hostname, cfg.Severity, true)}
+		}
+	case string(events.ActionHealthStatusHealthy):
+		if container.HealthAlerting {
+			container.HealthAlerting = false
+			return []Alert{*dockerHealthAlert(container, hostname, cfg.Severity, false)}
+		}
+	}
+	return nil
+}
+
+func evaluateContainer(c *ContainerState, hostname string, cfg DockerConfig) *Alert {
+	defer func() {
+		c.PendingDie = false
+		c.LastOOMAt = time.Time{}
+		c.LastStopAt = time.Time{}
+	}()
+
+	if !c.PendingDie {
+		return nil
+	}
+	if c.LastExit == 0 && c.LastOOMAt.IsZero() {
+		return nil
+	}
+	if c.IsAlerting {
+		return nil
+	}
+
+	c.IsAlerting = true
+	title := "Container exited with non-zero status"
+	if !c.LastOOMAt.IsZero() {
+		title = "Container killed by OOM"
+	}
+	return dockerExitAlert(c, hostname, cfg.Severity, true, title)
+}
+
+func evaluateDockerRestartLoop(c *ContainerState, hostname string, cfg DockerConfig, now time.Time) *Alert {
+	c.StartTimes = appendRecentTimes(c.StartTimes, now, cfg.RestartWindow.Std())
+	if !c.RestartAlerting || len(c.StartTimes) >= cfg.RestartThreshold {
+		return nil
+	}
+	c.RestartAlerting = false
+	return dockerRestartAlert(c, hostname, cfg.Severity, false, cfg.RestartThreshold)
+}
+
+func dockerRemovalAlerts(c *ContainerState, hostname string, severity Severity, restartThreshold int) []Alert {
+	var alerts []Alert
+	if c.IsAlerting {
+		c.IsAlerting = false
+		alerts = append(alerts, *dockerExitAlert(c, hostname, severity, false, "Container removed"))
+	}
+	if c.RestartAlerting {
+		c.RestartAlerting = false
+		alerts = append(alerts, *dockerRestartAlert(c, hostname, severity, false, restartThreshold))
+	}
+	if c.HealthAlerting {
+		c.HealthAlerting = false
+		alerts = append(alerts, *dockerHealthAlert(c, hostname, severity, false))
+	}
+	return alerts
+}
+
+func dockerExitAlert(c *ContainerState, hostname string, severity Severity, firing bool, title string) *Alert {
+	value := float64(0)
+	if firing {
+		value = float64(c.LastExit)
+	}
+	return &Alert{
+		IsFiring:  firing,
+		Title:     title,
+		Value:     value,
+		Threshold: 0,
+		Hostname:  hostname,
+		Metric:    "docker.container." + dockerMetricName(c) + ".exit_code",
+		Unit:      "exit_code",
+		Severity:  severity,
 	}
 }
 
-func evaluateContainer(c *ContainerState) {
-	if c.PendingDie {
-		if !c.LastOOMAt.IsZero() {
-			fmt.Printf("the container %s died with an OOM, immediate alert", c.ID)
-		} else if !c.LastStopAt.IsZero() && c.LastExit != 0 {
-			fmt.Printf("the container %s did not die cleanly", c.ID)
-		}
+func dockerRestartAlert(c *ContainerState, hostname string, severity Severity, firing bool, threshold int) *Alert {
+	return &Alert{
+		IsFiring:  firing,
+		Title:     "Container restart loop",
+		Value:     float64(len(c.StartTimes)),
+		Threshold: float64(threshold),
+		Hostname:  hostname,
+		Metric:    "docker.container." + dockerMetricName(c) + ".restarts",
+		Unit:      "count",
+		Severity:  severity,
+	}
+}
 
-		if c.LastExit != 0 {
-			fmt.Printf("The container did not die cleanly")
+func dockerHealthAlert(c *ContainerState, hostname string, severity Severity, firing bool) *Alert {
+	title := "Container healthcheck unhealthy"
+	value := float64(1)
+	if !firing {
+		title = "Container healthcheck healthy"
+		value = 0
+	}
+	return &Alert{
+		IsFiring:  firing,
+		Title:     title,
+		Value:     value,
+		Threshold: 0,
+		Hostname:  hostname,
+		Metric:    "docker.container." + dockerMetricName(c) + ".health",
+		Unit:      "state",
+		Severity:  severity,
+	}
+}
+
+func appendRecentTimes(times []time.Time, t time.Time, window time.Duration) []time.Time {
+	if t.IsZero() {
+		t = time.Now()
+	}
+	if window <= 0 {
+		return append(times, t)
+	}
+	cutoff := t.Add(-window)
+	kept := times[:0]
+	for _, existing := range times {
+		if existing.After(cutoff) || existing.Equal(cutoff) {
+			kept = append(kept, existing)
 		}
 	}
+	return append(kept, t)
+}
 
-	c.PendingDie = false
-	c.LastOOMAt = time.Time{}
-	c.LastStopAt = time.Time{}
+func dockerMetricName(c *ContainerState) string {
+	name := c.Name
+	if name == "" {
+		name = c.ID
+	}
+	name = strings.TrimPrefix(name, "/")
+	name = safeMetricPart(name)
+	if len(name) > 64 {
+		name = name[:64]
+	}
+	return name
 }

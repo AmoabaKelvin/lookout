@@ -80,6 +80,40 @@ func main() {
 			Severity:     cfg.Alerts.Load.Severity,
 			For:          cfg.Alerts.Load.For.Std(),
 		},
+		{
+			ID:           "cpu",
+			Matcher:      func(s MetricSample) bool { return s.Name == "cpu.used_percent" },
+			Threshold:    cfg.Alerts.CPU.Threshold,
+			ResolveBelow: *cfg.Alerts.CPU.ResolveBelow,
+			Message:      "High CPU usage",
+			Severity:     cfg.Alerts.CPU.Severity,
+			For:          cfg.Alerts.CPU.For.Std(),
+		},
+	}
+	for _, service := range cfg.Alerts.Systemd.Services {
+		service := service
+		rules = append(rules, Rule{
+			ID:           "systemd-" + safeMetricPart(service),
+			Matcher:      func(s MetricSample) bool { return s.Name == "systemd."+safeMetricPart(service)+".unhealthy" },
+			Threshold:    0,
+			ResolveBelow: 0,
+			Message:      "Systemd service unhealthy: " + service,
+			Severity:     cfg.Alerts.Systemd.Severity,
+		})
+	}
+	for _, check := range cfg.Alerts.HTTP.Checks {
+		checkName := check.Name
+		if checkName == "" {
+			checkName = check.URL
+		}
+		rules = append(rules, Rule{
+			ID:           "http-" + safeMetricPart(checkName),
+			Matcher:      func(s MetricSample) bool { return s.Name == "http."+safeMetricPart(checkName)+".unhealthy" },
+			Threshold:    0,
+			ResolveBelow: 0,
+			Message:      "HTTP check unhealthy: " + checkName,
+			Severity:     cfg.Alerts.HTTP.Severity,
+		})
 	}
 
 	alertManager := NewAlertManager(rules, cfg.Alerts.RenotifyAfter.Std(), cfg.Hostname, []Notifier{notifierQueue})
@@ -126,8 +160,34 @@ func main() {
 
 	evaluatorEvents := make(chan evaluatorEvent, 100)
 	dockerEventsChannel := make(chan DockerEvent, 100)
-	dockerEventsEvaluationChannel := make(chan string, 100)
+	dockerEventsEvaluationChannel := make(chan dockerEvaluation, 100)
 	containers := make(map[string]*ContainerState)
+	dockerStateFile := dockerStatePath(cfg.StateFile)
+	if cfg.Docker.Enabled {
+		containers, err = loadDockerState(dockerStateFile)
+		if err != nil {
+			log.Fatalf("docker state: %v", err)
+		}
+		snapshots, err := dockerContainerSnapshots(ctx, cli, containers)
+		if err != nil {
+			log.Printf("docker: failed to reconcile running containers: %v", err)
+		} else {
+			for _, alert := range reconcileDockerAlerts(containers, snapshots, cfg.Hostname, cfg.Docker) {
+				alertManager.dispatch(alert)
+			}
+			if err := saveDockerState(dockerStateFile, containers); err != nil {
+				log.Printf("error saving docker state: %v", err)
+			}
+		}
+	}
+	saveDockerStateFile := func() {
+		if !cfg.Docker.Enabled {
+			return
+		}
+		if err := saveDockerState(dockerStateFile, containers); err != nil {
+			log.Printf("error saving docker state: %v", err)
+		}
+	}
 
 	// single evaluator goroutine owns the alert + container state, so no mutex is needed
 	go func() {
@@ -148,14 +208,29 @@ func main() {
 				if !ok {
 					return
 				}
-				handleDockerEvent(containers, dockerEvent, dockerEventsEvaluationChannel)
+				if alerts := handleDockerEvent(containers, dockerEvent, dockerEventsEvaluationChannel, cfg.Hostname, cfg.Docker); len(alerts) > 0 {
+					for _, alert := range alerts {
+						alertManager.dispatch(alert)
+					}
+					saveDockerStateFile()
+				}
 
-			case pendingContainerToEvaluate, ok := <-dockerEventsEvaluationChannel:
+			case pendingEvaluation, ok := <-dockerEventsEvaluationChannel:
 				if !ok {
 					continue
 				}
-				if container := containers[pendingContainerToEvaluate]; container != nil {
-					evaluateContainer(container)
+				if container := containers[pendingEvaluation.ID]; container != nil {
+					var alert *Alert
+					switch pendingEvaluation.Kind {
+					case "restart":
+						alert = evaluateDockerRestartLoop(container, cfg.Hostname, cfg.Docker, time.Now())
+					default:
+						alert = evaluateContainer(container, cfg.Hostname, cfg.Docker)
+					}
+					if alert != nil {
+						alertManager.dispatch(*alert)
+						saveDockerStateFile()
+					}
 				}
 			}
 		}
@@ -167,6 +242,7 @@ func main() {
 		go dockerCollector(cli, ctx, dockerEventsChannel)
 	}
 
+	var cpuPrevious *cpuTimes
 	collect := func() {
 		data, err := memoryCollector(cfg.Alerts.Memory.Source)
 		if err != nil {
@@ -195,6 +271,24 @@ func main() {
 			}
 		}
 
+		cpuData, nextCPU, err := cpuCollector(cfg.Alerts.CPU.Source, cpuPrevious)
+		if err != nil {
+			fmt.Printf("Error collecting cpu info: %v\n", err)
+		} else {
+			cpuPrevious = nextCPU
+			for _, d := range cpuData {
+				evaluatorEvents <- evaluatorEvent{sample: d, hasSample: true}
+			}
+		}
+
+		for _, d := range systemdCollector(cfg.Alerts.Systemd.Services) {
+			evaluatorEvents <- evaluatorEvent{sample: d, hasSample: true}
+		}
+
+		for _, d := range httpCollector(cfg.Alerts.HTTP.Checks) {
+			evaluatorEvents <- evaluatorEvent{sample: d, hasSample: true}
+		}
+
 		evaluatorEvents <- evaluatorEvent{checkStale: true}
 	}
 
@@ -217,11 +311,28 @@ func trackedMetrics(cfg Config) []TrackedMetric {
 	tracked := []TrackedMetric{
 		{RuleID: "memory", Name: "memory.used_percent"},
 		{RuleID: "load", Name: "load.1"},
+		{RuleID: "cpu", Name: "cpu.used_percent"},
 	}
 	for _, mount := range cfg.Alerts.Disk.Mounts {
 		tracked = append(tracked, TrackedMetric{
 			RuleID: "disk",
 			Name:   "disk." + mountPointToName(mount) + ".used_percent",
+		})
+	}
+	for _, service := range cfg.Alerts.Systemd.Services {
+		tracked = append(tracked, TrackedMetric{
+			RuleID: "systemd-" + safeMetricPart(service),
+			Name:   "systemd." + safeMetricPart(service) + ".unhealthy",
+		})
+	}
+	for _, check := range cfg.Alerts.HTTP.Checks {
+		name := check.Name
+		if name == "" {
+			name = check.URL
+		}
+		tracked = append(tracked, TrackedMetric{
+			RuleID: "http-" + safeMetricPart(name),
+			Name:   "http." + safeMetricPart(name) + ".unhealthy",
 		})
 	}
 	return tracked

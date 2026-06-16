@@ -100,6 +100,25 @@ alerts:
     resolve_below: 3
     for: 2m
     severity: warning
+  cpu:
+    threshold: 85
+    resolve_below: 80
+    for: 2m
+    severity: warning
+  systemd:
+    severity: critical
+    services: []
+    # services:
+    #   - nginx
+    #   - postgresql
+  http:
+    severity: critical
+    checks: []
+    # checks:
+    #   - name: app
+    #     url: "https://example.com/health"
+    #     timeout: 5s
+    #     expected_status: 200
 
 # Alerts fan out to every notifier you configure. Uncomment the ones you want,
 # then restart the service.
@@ -137,6 +156,9 @@ heartbeat:
 
 docker:
   enabled: false
+  severity: critical
+  restart_threshold: 3
+  restart_window: 10m
 EOF
   echo "Created config template -> ${CONF_FILE}"
 else
