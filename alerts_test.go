@@ -39,6 +39,12 @@ func memRule(forDur time.Duration) Rule {
 	}
 }
 
+func memRuleWithResolveBelow(forDur time.Duration, resolveBelow float64) Rule {
+	rule := memRule(forDur)
+	rule.ResolveBelow = resolveBelow
+	return rule
+}
+
 func TestForDurationPendingThenFires(t *testing.T) {
 	am, cap, clock := newTestManager([]Rule{memRule(2 * time.Minute)}, time.Hour)
 
@@ -130,6 +136,38 @@ func TestResolveAfterFiring(t *testing.T) {
 	}
 	if cap.alerts[1].IsFiring {
 		t.Fatalf("expected second alert to be a resolve")
+	}
+}
+
+func TestResolveBelowPreventsFlappingNearThreshold(t *testing.T) {
+	am, cap, _ := newTestManager([]Rule{memRuleWithResolveBelow(0, 75)}, time.Hour)
+
+	am.Evaluate(memSample(81))   // fires
+	am.Evaluate(memSample(79.9)) // below fire threshold, above resolve threshold: stays firing
+	am.Evaluate(memSample(80.1)) // crosses fire threshold again, but was already firing
+	if len(cap.alerts) != 1 || !cap.alerts[0].IsFiring {
+		t.Fatalf("expected alert to stay firing without flapping, got %+v", cap.alerts)
+	}
+
+	am.Evaluate(memSample(75)) // finally resolves
+	if len(cap.alerts) != 2 || cap.alerts[1].IsFiring {
+		t.Fatalf("expected resolve at resolve threshold, got %+v", cap.alerts)
+	}
+}
+
+func TestRecoveryBandDoesNotRenotify(t *testing.T) {
+	am, cap, clock := newTestManager([]Rule{memRuleWithResolveBelow(0, 75)}, 10*time.Minute)
+
+	am.Evaluate(memSample(81)) // fires at t=0
+	*clock = clock.Add(10 * time.Minute)
+	am.Evaluate(memSample(79)) // still firing, but below fire threshold
+	if len(cap.alerts) != 1 {
+		t.Fatalf("expected no renotify while in recovery band, got %+v", cap.alerts)
+	}
+
+	am.Evaluate(memSample(81)) // now above fire threshold again, renotify budget has elapsed
+	if len(cap.alerts) != 2 || !cap.alerts[1].IsFiring {
+		t.Fatalf("expected renotify when above fire threshold again, got %+v", cap.alerts)
 	}
 }
 

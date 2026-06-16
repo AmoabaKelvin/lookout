@@ -47,18 +47,20 @@ type AlertsConfig struct {
 }
 
 type MemoryConfig struct {
-	Threshold float64  `yaml:"threshold"`
-	For       Duration `yaml:"for"`
-	Severity  Severity `yaml:"severity"`
-	Source    string   `yaml:"source"`
+	Threshold    float64  `yaml:"threshold"`
+	ResolveBelow *float64 `yaml:"resolve_below"`
+	For          Duration `yaml:"for"`
+	Severity     Severity `yaml:"severity"`
+	Source       string   `yaml:"source"`
 }
 
 type DiskConfig struct {
-	Threshold float64  `yaml:"threshold"`
-	For       Duration `yaml:"for"`
-	Severity  Severity `yaml:"severity"`
-	Source    string   `yaml:"source"`
-	Mounts    []string `yaml:"mounts"`
+	Threshold    float64  `yaml:"threshold"`
+	ResolveBelow *float64 `yaml:"resolve_below"`
+	For          Duration `yaml:"for"`
+	Severity     Severity `yaml:"severity"`
+	Source       string   `yaml:"source"`
+	Mounts       []string `yaml:"mounts"`
 }
 
 // Notifier sections are pointers so an absent section is nil (not configured)
@@ -159,6 +161,8 @@ func (c *Config) validate() {
 
 	clampThreshold(&c.Alerts.Memory.Threshold, "alerts.memory.threshold")
 	clampThreshold(&c.Alerts.Disk.Threshold, "alerts.disk.threshold")
+	c.Alerts.Memory.ResolveBelow = normalizedResolveBelow(c.Alerts.Memory.ResolveBelow, c.Alerts.Memory.Threshold, "alerts.memory.resolve_below")
+	c.Alerts.Disk.ResolveBelow = normalizedResolveBelow(c.Alerts.Disk.ResolveBelow, c.Alerts.Disk.Threshold, "alerts.disk.resolve_below")
 
 	clampFor(&c.Alerts.Memory.For, "alerts.memory.for")
 	clampFor(&c.Alerts.Disk.For, "alerts.disk.for")
@@ -174,6 +178,14 @@ func clampInterval(d *Duration, fallback time.Duration, name string) {
 	}
 }
 
+func defaultResolveBelow(threshold float64) float64 {
+	resolveBelow := threshold - 5
+	if resolveBelow < 0 {
+		return 0
+	}
+	return resolveBelow
+}
+
 func clampThreshold(v *float64, name string) {
 	if *v < 0 || *v > 100 {
 		clamped := *v
@@ -185,6 +197,18 @@ func clampThreshold(v *float64, name string) {
 		log.Printf("config: %s must be between 0 and 100; using %.0f", name, clamped)
 		*v = clamped
 	}
+}
+
+func normalizedResolveBelow(v *float64, threshold float64, name string) *float64 {
+	fallback := defaultResolveBelow(threshold)
+	if v == nil {
+		return &fallback
+	}
+	if *v < 0 || *v > threshold {
+		log.Printf("config: %s must be between 0 and threshold %.0f; using %.0f", name, threshold, fallback)
+		return &fallback
+	}
+	return v
 }
 
 func clampFor(d *Duration, name string) {

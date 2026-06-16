@@ -38,20 +38,22 @@ func main() {
 
 	rules := []Rule{
 		{
-			ID:        "memory",
-			Matcher:   func(s MetricSample) bool { return s.Name == "memory.used_percent" },
-			Threshold: cfg.Alerts.Memory.Threshold,
-			Message:   "High memory usage",
-			Severity:  cfg.Alerts.Memory.Severity,
-			For:       cfg.Alerts.Memory.For.Std(),
+			ID:           "memory",
+			Matcher:      func(s MetricSample) bool { return s.Name == "memory.used_percent" },
+			Threshold:    cfg.Alerts.Memory.Threshold,
+			ResolveBelow: *cfg.Alerts.Memory.ResolveBelow,
+			Message:      "High memory usage",
+			Severity:     cfg.Alerts.Memory.Severity,
+			For:          cfg.Alerts.Memory.For.Std(),
 		},
 		{
-			ID:        "disk",
-			Matcher:   func(s MetricSample) bool { return s.Collector == "disk" && strings.HasSuffix(s.Name, ".used_percent") },
-			Threshold: cfg.Alerts.Disk.Threshold,
-			Message:   "High disk usage",
-			Severity:  cfg.Alerts.Disk.Severity,
-			For:       cfg.Alerts.Disk.For.Std(),
+			ID:           "disk",
+			Matcher:      func(s MetricSample) bool { return s.Collector == "disk" && strings.HasSuffix(s.Name, ".used_percent") },
+			Threshold:    cfg.Alerts.Disk.Threshold,
+			ResolveBelow: *cfg.Alerts.Disk.ResolveBelow,
+			Message:      "High disk usage",
+			Severity:     cfg.Alerts.Disk.Severity,
+			For:          cfg.Alerts.Disk.For.Std(),
 		},
 	}
 

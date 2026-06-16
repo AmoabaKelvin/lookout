@@ -13,12 +13,13 @@ const (
 )
 
 type Rule struct {
-	ID        string
-	Matcher   func(MetricSample) bool
-	Threshold float64
-	Message   string
-	Severity  Severity
-	For       time.Duration // how long a breach must persist before firing
+	ID           string
+	Matcher      func(MetricSample) bool
+	Threshold    float64
+	ResolveBelow float64
+	Message      string
+	Severity     Severity
+	For          time.Duration // how long a breach must persist before firing
 }
 
 type Alert struct {
@@ -80,6 +81,13 @@ func (am *AlertManager) buildAlert(rule Rule, sample MetricSample, firing bool) 
 	}
 }
 
+func (r Rule) resolveThreshold() float64 {
+	if r.ResolveBelow > 0 {
+		return r.ResolveBelow
+	}
+	return r.Threshold
+}
+
 func (am *AlertManager) Evaluate(sample MetricSample) {
 	now := am.now()
 
@@ -95,27 +103,37 @@ func (am *AlertManager) Evaluate(sample MetricSample) {
 			am.StateManager[key] = state
 		}
 
-		if sample.Value <= rule.Threshold {
-			state.pendingSince = time.Time{}
-			if state.isFiring {
+		if state.isFiring {
+			resolveThreshold := rule.resolveThreshold()
+			isResolved := sample.Value <= resolveThreshold
+			isBreaching := sample.Value > rule.Threshold
+
+			if isResolved {
+				state.pendingSince = time.Time{}
 				am.dispatch(am.buildAlert(rule, sample, false))
 				state.isFiring = false
+				continue
 			}
+			if !isBreaching {
+				continue
+			}
+
+			// still above the firing threshold: nudge again only after RenotifyAfter
+			if now.Sub(state.lastNotified) >= am.RenotifyAfter {
+				am.dispatch(am.buildAlert(rule, sample, true))
+				state.lastNotified = now
+			}
+			continue
+		}
+
+		if sample.Value <= rule.Threshold {
+			state.pendingSince = time.Time{}
 			continue
 		}
 
 		// breached: start the clock if this is the first sample over the line
 		if state.pendingSince.IsZero() {
 			state.pendingSince = now
-		}
-
-		if state.isFiring {
-			// already firing: nudge again only after RenotifyAfter
-			if now.Sub(state.lastNotified) >= am.RenotifyAfter {
-				am.dispatch(am.buildAlert(rule, sample, true))
-				state.lastNotified = now
-			}
-			continue
 		}
 
 		// pending: fire once the breach has persisted for at least rule.For

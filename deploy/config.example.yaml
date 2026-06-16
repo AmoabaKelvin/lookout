@@ -8,10 +8,12 @@ alerts:
   renotify_after: 1h
   memory:
     threshold: 85
+    resolve_below: 80
     for: 2m
     severity: critical
   disk:
     threshold: 85
+    resolve_below: 80
     for: 2m
     severity: warning
     mounts:
