@@ -65,6 +65,28 @@ func TestForDurationPendingThenFires(t *testing.T) {
 	}
 }
 
+func TestMemoryRuleFiresAfterConfiguredFiveMinutes(t *testing.T) {
+	am, cap, clock := newTestManager([]Rule{memRule(5 * time.Minute)}, time.Hour)
+
+	am.Evaluate(memSample(80)) // equal to threshold is not a breach
+	if len(cap.alerts) != 0 {
+		t.Fatalf("expected no alert at threshold, got %d", len(cap.alerts))
+	}
+
+	am.Evaluate(memSample(81)) // t=0: pending starts
+	*clock = clock.Add(4*time.Minute + 59*time.Second)
+	am.Evaluate(memSample(81))
+	if len(cap.alerts) != 0 {
+		t.Fatalf("expected no alert before five minutes, got %d", len(cap.alerts))
+	}
+
+	*clock = clock.Add(time.Second)
+	am.Evaluate(memSample(81))
+	if len(cap.alerts) != 1 || !cap.alerts[0].IsFiring {
+		t.Fatalf("expected firing alert after five minutes, got %+v", cap.alerts)
+	}
+}
+
 func TestDipResetsPendingClock(t *testing.T) {
 	am, cap, clock := newTestManager([]Rule{memRule(2 * time.Minute)}, time.Hour)
 

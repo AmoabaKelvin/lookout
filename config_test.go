@@ -82,6 +82,24 @@ heartbeat:
 	}
 }
 
+func TestLoadConfigMemoryThresholdForFiveMinutes(t *testing.T) {
+	cfg, err := LoadConfig(writeConfig(t, `
+alerts:
+  memory:
+    threshold: 80
+    for: 5m
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Alerts.Memory.Threshold != 80 {
+		t.Fatalf("memory threshold: got %v", cfg.Alerts.Memory.Threshold)
+	}
+	if cfg.Alerts.Memory.For.Std() != 5*time.Minute {
+		t.Fatalf("memory for duration: got %s", cfg.Alerts.Memory.For.Std())
+	}
+}
+
 func TestLoadConfigInvalidDuration(t *testing.T) {
 	_, err := LoadConfig(writeConfig(t, "collection_interval: notaduration\n"))
 	if err == nil {
