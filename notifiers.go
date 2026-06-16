@@ -2,9 +2,12 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -13,6 +16,51 @@ import (
 
 type Notifier interface {
 	Send(alert Alert) error
+}
+
+var errNotifierQueueFull = errors.New("notifier queue is full")
+
+type asyncNotifier struct {
+	queue     chan Alert
+	notifiers []Notifier
+}
+
+func newAsyncNotifier(notifiers []Notifier, capacity int) *asyncNotifier {
+	if capacity < 1 {
+		capacity = 1
+	}
+	return &asyncNotifier{
+		queue:     make(chan Alert, capacity),
+		notifiers: notifiers,
+	}
+}
+
+func (n *asyncNotifier) Send(alert Alert) error {
+	select {
+	case n.queue <- alert:
+		return nil
+	default:
+		return errNotifierQueueFull
+	}
+}
+
+func (n *asyncNotifier) Run(ctx context.Context) {
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case alert := <-n.queue:
+			n.send(alert)
+		}
+	}
+}
+
+func (n *asyncNotifier) send(alert Alert) {
+	for _, notifier := range n.notifiers {
+		if err := notifier.Send(alert); err != nil {
+			log.Printf("error sending alert: %v", err)
+		}
+	}
 }
 
 var httpClient = &http.Client{Timeout: 10 * time.Second}
@@ -74,8 +122,7 @@ func formatValue(value float64, unit string) string {
 const maxSendAttempts = 3
 
 // postJSON POSTs payload as JSON, retrying transient failures (network, 5xx,
-// 429) with backoff; other 4xx are returned immediately. It runs synchronously
-// in the evaluator goroutine, so the retry budget is kept small (issue #9).
+// 429) with backoff; other 4xx are returned immediately.
 func postJSON(url string, payload any) error {
 	body, err := json.Marshal(payload)
 	if err != nil {

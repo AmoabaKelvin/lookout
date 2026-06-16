@@ -17,6 +17,8 @@ import (
 // version is set at build time via -ldflags "-X main.version=...".
 var version = "dev"
 
+const notifierQueueSize = 100
+
 type evaluatorEvent struct {
 	sample     MetricSample
 	hasSample  bool
@@ -41,6 +43,8 @@ func main() {
 		notifiers = append(notifiers, &ConsoleNotifier{})
 		fmt.Println("No notifier configured; alerts will print to the console")
 	}
+	notifierQueue := newAsyncNotifier(notifiers, notifierQueueSize)
+	go notifierQueue.Run(ctx)
 
 	rules := []Rule{
 		{
@@ -63,7 +67,7 @@ func main() {
 		},
 	}
 
-	alertManager := NewAlertManager(rules, cfg.Alerts.RenotifyAfter.Std(), cfg.Hostname, notifiers)
+	alertManager := NewAlertManager(rules, cfg.Alerts.RenotifyAfter.Std(), cfg.Hostname, []Notifier{notifierQueue})
 	alertManager.StaleAfter = cfg.Alerts.StaleAfter.Std()
 	alertManager.Tracked = trackedMetrics(cfg)
 
