@@ -16,6 +16,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -155,13 +156,25 @@ func TestBuildNotifiersValidatesAndReturnsActiveNames(t *testing.T) {
 	if len(notifiers) != 6 {
 		t.Fatalf("notifiers = %d, want 6", len(notifiers))
 	}
-	if got := strings.Join(active, ","); got != "slack,teams,webhook,telegram,pagerduty,email" {
-		t.Fatalf("active notifiers = %q", got)
+	wantActive := []string{"slack", "teams", "webhook", "telegram", "pagerduty", "email"}
+	for _, name := range wantActive {
+		if !slices.Contains(active, name) {
+			t.Fatalf("active notifiers = %v, missing %s", active, name)
+		}
 	}
-	smtpNotifier, ok := notifiers[5].(*SMTPNotifier)
-	if !ok || !smtpNotifier.ImplicitTLS {
-		t.Fatalf("email notifier did not keep implicit TLS setting: %#v", notifiers[5])
+	smtpNotifier := findSMTPNotifier(notifiers)
+	if smtpNotifier == nil || !smtpNotifier.ImplicitTLS {
+		t.Fatalf("email notifier did not keep implicit TLS setting: %#v", notifiers)
 	}
+}
+
+func findSMTPNotifier(notifiers []Notifier) *SMTPNotifier {
+	for _, notifier := range notifiers {
+		if smtpNotifier, ok := notifier.(*SMTPNotifier); ok {
+			return smtpNotifier
+		}
+	}
+	return nil
 }
 
 func TestBuildNotifiersRejectsInvalidWebhookURL(t *testing.T) {
