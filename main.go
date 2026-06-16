@@ -77,8 +77,12 @@ func main() {
 	}
 
 	alertManager := NewAlertManager(rules, cfg.Alerts.RenotifyAfter.Std(), cfg.Hostname, []Notifier{notifierQueue})
+	alertManager.StateFile = cfg.StateFile
 	alertManager.StaleAfter = cfg.Alerts.StaleAfter.Std()
 	alertManager.Tracked = trackedMetrics(cfg)
+	if err := alertManager.LoadState(cfg.StateFile); err != nil {
+		log.Fatalf("alert state: %v", err)
+	}
 
 	// only build the docker client when enabled; client.New would otherwise fail startup
 	var cli *client.Client

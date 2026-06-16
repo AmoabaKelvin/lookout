@@ -1,7 +1,11 @@
 package main
 
 import (
+	"encoding/json"
+	"errors"
 	"log"
+	"os"
+	"path/filepath"
 	"time"
 )
 
@@ -54,6 +58,7 @@ type alertState struct {
 type AlertManager struct {
 	Rules         []Rule
 	StateManager  map[string]*alertState
+	StateFile     string
 	RenotifyAfter time.Duration
 	StaleAfter    time.Duration
 	Tracked       []TrackedMetric
@@ -71,6 +76,117 @@ func NewAlertManager(rules []Rule, renotifyAfter time.Duration, hostname string,
 		Notifiers:     notifiers,
 		now:           time.Now,
 	}
+}
+
+type storedAlertState struct {
+	RuleID            string    `json:"rule_id"`
+	MetricName        string    `json:"metric_name"`
+	IsFiring          bool      `json:"is_firing"`
+	PendingSince      time.Time `json:"pending_since,omitempty"`
+	LastNotified      time.Time `json:"last_notified,omitempty"`
+	LastSeen          time.Time `json:"last_seen,omitempty"`
+	MissingSince      time.Time `json:"missing_since,omitempty"`
+	IsStale           bool      `json:"is_stale"`
+	StaleLastNotified time.Time `json:"stale_last_notified,omitempty"`
+}
+
+func stateKey(ruleID, metricName string) string {
+	return ruleID + "|" + metricName
+}
+
+func (am *AlertManager) LoadState(path string) error {
+	if path == "" {
+		return nil
+	}
+
+	data, err := os.ReadFile(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+
+	var stored []storedAlertState
+	if err := json.Unmarshal(data, &stored); err != nil {
+		return err
+	}
+
+	for _, s := range stored {
+		if s.RuleID == "" || s.MetricName == "" {
+			continue
+		}
+		am.StateManager[stateKey(s.RuleID, s.MetricName)] = &alertState{
+			ruleID:            s.RuleID,
+			metricName:        s.MetricName,
+			isFiring:          s.IsFiring,
+			pendingSince:      s.PendingSince,
+			lastNotified:      s.LastNotified,
+			lastSeen:          s.LastSeen,
+			missingSince:      s.MissingSince,
+			isStale:           s.IsStale,
+			staleLastNotified: s.StaleLastNotified,
+		}
+	}
+	return nil
+}
+
+func (am *AlertManager) saveState() {
+	if am.StateFile == "" {
+		return
+	}
+	if err := am.writeState(am.StateFile); err != nil {
+		log.Printf("error saving alert state: %v", err)
+	}
+}
+
+func (am *AlertManager) writeState(path string) error {
+	stored := make([]storedAlertState, 0, len(am.StateManager))
+	for _, s := range am.StateManager {
+		stored = append(stored, storedAlertState{
+			RuleID:            s.ruleID,
+			MetricName:        s.metricName,
+			IsFiring:          s.isFiring,
+			PendingSince:      s.pendingSince,
+			LastNotified:      s.lastNotified,
+			LastSeen:          s.lastSeen,
+			MissingSince:      s.missingSince,
+			IsStale:           s.isStale,
+			StaleLastNotified: s.staleLastNotified,
+		})
+	}
+
+	data, err := json.MarshalIndent(stored, "", "  ")
+	if err != nil {
+		return err
+	}
+	data = append(data, '\n')
+
+	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return err
+	}
+
+	tmp, err := os.CreateTemp(dir, ".state-*.tmp")
+	if err != nil {
+		return err
+	}
+	tmpName := tmp.Name()
+	defer os.Remove(tmpName)
+
+	if _, err := tmp.Write(data); err != nil {
+		tmp.Close()
+		return err
+	}
+	if err := tmp.Chmod(0o600); err != nil {
+		tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+
+	return os.Rename(tmpName, path)
 }
 
 func (am *AlertManager) dispatch(alert Alert) {
@@ -122,7 +238,7 @@ func (s *alertState) missingFor(now time.Time) time.Duration {
 }
 
 func (am *AlertManager) stateFor(rule Rule, metricName string) *alertState {
-	key := rule.ID + "|" + metricName
+	key := stateKey(rule.ID, metricName)
 	state := am.StateManager[key]
 	if state == nil {
 		state = &alertState{ruleID: rule.ID, metricName: metricName}
@@ -149,14 +265,19 @@ func (am *AlertManager) Evaluate(sample MetricSample) {
 		}
 
 		state := am.stateFor(rule, sample.Name)
+		stateChanged := false
 		if state.isStale {
 			age := state.missingFor(now)
 			am.dispatch(am.buildStaleAlert(sample.Name, false, age))
 			state.isStale = false
 			state.staleLastNotified = time.Time{}
+			stateChanged = true
 		}
 		state.lastSeen = now
 		state.missingSince = time.Time{}
+		if stateChanged {
+			am.saveState()
+		}
 
 		if state.isFiring {
 			isResolved := sample.Value <= rule.ResolveBelow
@@ -166,6 +287,7 @@ func (am *AlertManager) Evaluate(sample MetricSample) {
 				state.pendingSince = time.Time{}
 				am.dispatch(am.buildAlert(rule, sample, false))
 				state.isFiring = false
+				am.saveState()
 				continue
 			}
 			if !isBreaching {
@@ -176,18 +298,23 @@ func (am *AlertManager) Evaluate(sample MetricSample) {
 			if now.Sub(state.lastNotified) >= am.RenotifyAfter {
 				am.dispatch(am.buildAlert(rule, sample, true))
 				state.lastNotified = now
+				am.saveState()
 			}
 			continue
 		}
 
 		if sample.Value <= rule.Threshold {
-			state.pendingSince = time.Time{}
+			if !state.pendingSince.IsZero() {
+				state.pendingSince = time.Time{}
+				am.saveState()
+			}
 			continue
 		}
 
 		// breached: start the clock if this is the first sample over the line
 		if state.pendingSince.IsZero() {
 			state.pendingSince = now
+			am.saveState()
 		}
 
 		// pending: fire once the breach has persisted for at least rule.For
@@ -195,6 +322,7 @@ func (am *AlertManager) Evaluate(sample MetricSample) {
 			am.dispatch(am.buildAlert(rule, sample, true))
 			state.isFiring = true
 			state.lastNotified = now
+			am.saveState()
 		}
 	}
 }
@@ -216,6 +344,7 @@ func (am *AlertManager) CheckStale() {
 		if state.lastSeen.IsZero() {
 			if state.missingSince.IsZero() {
 				state.missingSince = now
+				am.saveState()
 				continue
 			}
 		}
@@ -229,6 +358,7 @@ func (am *AlertManager) CheckStale() {
 			if now.Sub(state.staleLastNotified) >= am.RenotifyAfter {
 				am.dispatch(am.buildStaleAlert(state.metricName, true, missingFor))
 				state.staleLastNotified = now
+				am.saveState()
 			}
 			continue
 		}
@@ -236,5 +366,6 @@ func (am *AlertManager) CheckStale() {
 		am.dispatch(am.buildStaleAlert(state.metricName, true, missingFor))
 		state.isStale = true
 		state.staleLastNotified = now
+		am.saveState()
 	}
 }

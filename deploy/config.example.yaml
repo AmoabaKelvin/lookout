@@ -3,6 +3,7 @@
 # Durations are strings: 30s, 2m, 1h.
 
 collection_interval: 30s
+state_file: /var/lib/lookout/state.json
 
 alerts:
   renotify_after: 1h

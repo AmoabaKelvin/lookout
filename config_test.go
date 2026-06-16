@@ -25,6 +25,9 @@ func TestLoadConfigDefaults(t *testing.T) {
 	if cfg.CollectionInterval.Std() != 30*time.Second {
 		t.Errorf("collection interval: got %s", cfg.CollectionInterval.Std())
 	}
+	if cfg.StateFile != defaultStateFile {
+		t.Errorf("state file: got %s", cfg.StateFile)
+	}
 	if cfg.Alerts.Memory.Threshold != 80 {
 		t.Errorf("memory threshold: got %v", cfg.Alerts.Memory.Threshold)
 	}
@@ -54,6 +57,7 @@ func TestLoadConfigDefaults(t *testing.T) {
 func TestLoadConfigOverrides(t *testing.T) {
 	cfg, err := LoadConfig(writeConfig(t, `
 collection_interval: 1m
+state_file: /tmp/lookout-state.json
 alerts:
   stale_after: 4m
   memory:
@@ -84,6 +88,9 @@ heartbeat:
 	}
 	if cfg.CollectionInterval.Std() != time.Minute {
 		t.Errorf("collection interval: got %s", cfg.CollectionInterval.Std())
+	}
+	if cfg.StateFile != "/tmp/lookout-state.json" {
+		t.Errorf("state file override: got %s", cfg.StateFile)
 	}
 	if cfg.Alerts.Memory.Threshold != 90 || cfg.Alerts.Memory.For.Std() != 30*time.Second {
 		t.Errorf("memory overrides not applied: %+v", cfg.Alerts.Memory)

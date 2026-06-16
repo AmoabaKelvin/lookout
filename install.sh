@@ -75,6 +75,7 @@ if [ ! -f "$CONF_FILE" ]; then
 # Durations are strings: 30s, 2m, 1h.
 
 collection_interval: 30s
+state_file: /var/lib/lookout/state.json
 
 alerts:
   renotify_after: 1h
@@ -153,6 +154,7 @@ Group=${SERVICE_USER}
 ExecStart=${BIN_DIR}/lookout --config ${CONF_FILE}
 Restart=always
 RestartSec=5
+StateDirectory=lookout
 NoNewPrivileges=true
 ProtectSystem=strict
 ProtectHome=true

@@ -10,6 +10,7 @@ import (
 )
 
 const defaultConfigPath = "/etc/lookout/config.yaml"
+const defaultStateFile = "/var/lib/lookout/state.json"
 
 // Duration wraps time.Duration so it can be read from YAML as a string like
 // "30s", "2m" or "1h" instead of a raw nanosecond integer.
@@ -32,6 +33,7 @@ func (d Duration) Std() time.Duration { return time.Duration(d) }
 
 type Config struct {
 	CollectionInterval Duration        `yaml:"collection_interval"`
+	StateFile          string          `yaml:"state_file"`
 	Alerts             AlertsConfig    `yaml:"alerts"`
 	Notifiers          NotifiersConfig `yaml:"notifiers"`
 	Heartbeat          HeartbeatConfig `yaml:"heartbeat"`
@@ -118,6 +120,7 @@ type DockerConfig struct {
 func defaultConfig() Config {
 	return Config{
 		CollectionInterval: Duration(30 * time.Second),
+		StateFile:          defaultStateFile,
 		Alerts: AlertsConfig{
 			RenotifyAfter: Duration(time.Hour),
 			Memory: MemoryConfig{
@@ -172,6 +175,7 @@ func LoadConfig(path string) (Config, error) {
 // misconfigured file degrades gracefully instead of crashing or going silent.
 func (c *Config) validate() {
 	clampInterval(&c.CollectionInterval, 30*time.Second, "collection_interval")
+	defaultString(&c.StateFile, defaultStateFile)
 	clampInterval(&c.Heartbeat.Interval, 60*time.Second, "heartbeat.interval")
 	clampInterval(&c.Alerts.RenotifyAfter, time.Hour, "alerts.renotify_after")
 	defaultStaleAfter(&c.Alerts.StaleAfter, 3*c.CollectionInterval.Std())
@@ -190,6 +194,12 @@ func (c *Config) validate() {
 	clampSeverity(&c.Alerts.Memory.Severity, SeverityCritical, "alerts.memory.severity")
 	clampSeverity(&c.Alerts.Disk.Severity, SeverityWarning, "alerts.disk.severity")
 	clampSeverity(&c.Alerts.Load.Severity, SeverityWarning, "alerts.load.severity")
+}
+
+func defaultString(s *string, fallback string) {
+	if *s == "" {
+		*s = fallback
+	}
 }
 
 func clampInterval(d *Duration, fallback time.Duration, name string) {

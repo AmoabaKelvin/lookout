@@ -1,6 +1,8 @@
 package main
 
 import (
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 )
@@ -293,5 +295,55 @@ func TestStaleMetricRenotifiesAfterBudget(t *testing.T) {
 	am.CheckStale()
 	if len(cap.alerts) != 2 || !cap.alerts[1].IsFiring {
 		t.Fatalf("expected stale renotify after budget, got %+v", cap.alerts)
+	}
+}
+
+func TestAlertStatePersistsFiringAcrossRestart(t *testing.T) {
+	stateFile := filepath.Join(t.TempDir(), "state.json")
+
+	am, cap, _ := newTestManager([]Rule{memRule(0)}, time.Hour)
+	am.StateFile = stateFile
+	am.Evaluate(memSample(90))
+	if len(cap.alerts) != 1 || !cap.alerts[0].IsFiring {
+		t.Fatalf("expected initial firing alert, got %+v", cap.alerts)
+	}
+
+	restarted, restartedCap, _ := newTestManager([]Rule{memRule(0)}, time.Hour)
+	restarted.StateFile = stateFile
+	if err := restarted.LoadState(stateFile); err != nil {
+		t.Fatal(err)
+	}
+
+	restarted.Evaluate(memSample(90))
+	if len(restartedCap.alerts) != 0 {
+		t.Fatalf("expected no duplicate firing alert after restart, got %+v", restartedCap.alerts)
+	}
+
+	restarted.Evaluate(memSample(50))
+	if len(restartedCap.alerts) != 1 || restartedCap.alerts[0].IsFiring {
+		t.Fatalf("expected recovered alert after persisted firing state, got %+v", restartedCap.alerts)
+	}
+}
+
+func TestLoadStateMissingFileIsOK(t *testing.T) {
+	am, _, _ := newTestManager([]Rule{memRule(0)}, time.Hour)
+	if err := am.LoadState(filepath.Join(t.TempDir(), "missing.json")); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestSaveStateCreatesPrivateFile(t *testing.T) {
+	stateFile := filepath.Join(t.TempDir(), "nested", "state.json")
+	am, _, _ := newTestManager([]Rule{memRule(0)}, time.Hour)
+	am.StateFile = stateFile
+
+	am.Evaluate(memSample(90))
+
+	info, err := os.Stat(stateFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := info.Mode().Perm(); got != 0o600 {
+		t.Fatalf("state file permissions: got %v", got)
 	}
 }
