@@ -28,6 +28,9 @@ func TestLoadConfigDefaults(t *testing.T) {
 	if cfg.Alerts.Memory.Threshold != 80 {
 		t.Errorf("memory threshold: got %v", cfg.Alerts.Memory.Threshold)
 	}
+	if cfg.Alerts.StaleAfter.Std() != 90*time.Second {
+		t.Errorf("stale after: got %s", cfg.Alerts.StaleAfter.Std())
+	}
 	if cfg.Alerts.Memory.ResolveBelow == nil || *cfg.Alerts.Memory.ResolveBelow != 75 {
 		t.Errorf("memory resolve below: got %v", cfg.Alerts.Memory.ResolveBelow)
 	}
@@ -46,6 +49,7 @@ func TestLoadConfigOverrides(t *testing.T) {
 	cfg, err := LoadConfig(writeConfig(t, `
 collection_interval: 1m
 alerts:
+  stale_after: 4m
   memory:
     threshold: 90
     resolve_below: 82
@@ -72,6 +76,9 @@ heartbeat:
 	}
 	if cfg.Alerts.Memory.Threshold != 90 || cfg.Alerts.Memory.For.Std() != 30*time.Second {
 		t.Errorf("memory overrides not applied: %+v", cfg.Alerts.Memory)
+	}
+	if cfg.Alerts.StaleAfter.Std() != 4*time.Minute {
+		t.Errorf("stale_after override: got %s", cfg.Alerts.StaleAfter.Std())
 	}
 	if cfg.Alerts.Memory.ResolveBelow == nil || *cfg.Alerts.Memory.ResolveBelow != 82 {
 		t.Errorf("memory resolve below override: got %v", cfg.Alerts.Memory.ResolveBelow)
@@ -114,6 +121,18 @@ alerts:
 	}
 	if cfg.Alerts.Memory.ResolveBelow == nil || *cfg.Alerts.Memory.ResolveBelow != 75 {
 		t.Fatalf("memory resolve below default: got %v", cfg.Alerts.Memory.ResolveBelow)
+	}
+}
+
+func TestLoadConfigStaleAfterDefaultsToThreeCollectionIntervals(t *testing.T) {
+	cfg, err := LoadConfig(writeConfig(t, `
+collection_interval: 1m
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Alerts.StaleAfter.Std() != 3*time.Minute {
+		t.Fatalf("stale_after default: got %s", cfg.Alerts.StaleAfter.Std())
 	}
 }
 

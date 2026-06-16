@@ -22,6 +22,11 @@ type Rule struct {
 	For          time.Duration // how long a breach must persist before firing
 }
 
+type TrackedMetric struct {
+	RuleID string
+	Name   string
+}
+
 type Alert struct {
 	IsFiring  bool
 	Title     string
@@ -33,17 +38,25 @@ type Alert struct {
 	Severity  Severity
 }
 
-// alertState tracks one rule+metric pair through inactive -> pending -> firing.
+// alertState tracks one rule+metric pair through threshold and staleness alerts.
 type alertState struct {
-	isFiring     bool
-	pendingSince time.Time // when the current breach streak began; zero when not breached
-	lastNotified time.Time
+	ruleID            string
+	metricName        string
+	isFiring          bool
+	pendingSince      time.Time // when the current breach streak began; zero when not breached
+	lastNotified      time.Time
+	lastSeen          time.Time
+	missingSince      time.Time
+	isStale           bool
+	staleLastNotified time.Time
 }
 
 type AlertManager struct {
 	Rules         []Rule
 	StateManager  map[string]*alertState
 	RenotifyAfter time.Duration
+	StaleAfter    time.Duration
+	Tracked       []TrackedMetric
 	Hostname      string
 	Notifiers     []Notifier
 	now           func() time.Time // injectable for tests
@@ -81,11 +94,50 @@ func (am *AlertManager) buildAlert(rule Rule, sample MetricSample, firing bool) 
 	}
 }
 
-func (r Rule) resolveThreshold() float64 {
-	if r.ResolveBelow > 0 {
-		return r.ResolveBelow
+func (am *AlertManager) buildStaleAlert(metricName string, firing bool, age time.Duration) Alert {
+	title := "Metric not reporting"
+	if !firing {
+		title = "Metric reporting restored"
 	}
-	return r.Threshold
+	return Alert{
+		IsFiring:  firing,
+		Title:     title,
+		Value:     age.Seconds(),
+		Threshold: am.StaleAfter.Seconds(),
+		Hostname:  am.Hostname,
+		Metric:    metricName,
+		Unit:      "seconds",
+		Severity:  SeverityWarning,
+	}
+}
+
+func (s *alertState) missingFor(now time.Time) time.Duration {
+	if !s.lastSeen.IsZero() {
+		return now.Sub(s.lastSeen)
+	}
+	if !s.missingSince.IsZero() {
+		return now.Sub(s.missingSince)
+	}
+	return 0
+}
+
+func (am *AlertManager) stateFor(rule Rule, metricName string) *alertState {
+	key := rule.ID + "|" + metricName
+	state := am.StateManager[key]
+	if state == nil {
+		state = &alertState{ruleID: rule.ID, metricName: metricName}
+		am.StateManager[key] = state
+	}
+	return state
+}
+
+func (am *AlertManager) ruleByID(id string) (Rule, bool) {
+	for _, rule := range am.Rules {
+		if rule.ID == id {
+			return rule, true
+		}
+	}
+	return Rule{}, false
 }
 
 func (am *AlertManager) Evaluate(sample MetricSample) {
@@ -96,16 +148,18 @@ func (am *AlertManager) Evaluate(sample MetricSample) {
 			continue
 		}
 
-		key := rule.ID + "|" + sample.Name
-		state := am.StateManager[key]
-		if state == nil {
-			state = &alertState{}
-			am.StateManager[key] = state
+		state := am.stateFor(rule, sample.Name)
+		if state.isStale {
+			age := state.missingFor(now)
+			am.dispatch(am.buildStaleAlert(sample.Name, false, age))
+			state.isStale = false
+			state.staleLastNotified = time.Time{}
 		}
+		state.lastSeen = now
+		state.missingSince = time.Time{}
 
 		if state.isFiring {
-			resolveThreshold := rule.resolveThreshold()
-			isResolved := sample.Value <= resolveThreshold
+			isResolved := sample.Value <= rule.ResolveBelow
 			isBreaching := sample.Value > rule.Threshold
 
 			if isResolved {
@@ -142,5 +196,45 @@ func (am *AlertManager) Evaluate(sample MetricSample) {
 			state.isFiring = true
 			state.lastNotified = now
 		}
+	}
+}
+
+func (am *AlertManager) CheckStale() {
+	if am.StaleAfter <= 0 {
+		return
+	}
+
+	now := am.now()
+	for _, tracked := range am.Tracked {
+		if rule, ok := am.ruleByID(tracked.RuleID); ok {
+			am.stateFor(rule, tracked.Name)
+		}
+	}
+
+	for _, state := range am.StateManager {
+		missingFor := state.missingFor(now)
+		if state.lastSeen.IsZero() {
+			if state.missingSince.IsZero() {
+				state.missingSince = now
+				continue
+			}
+		}
+
+		if missingFor < am.StaleAfter {
+			continue
+		}
+
+		state.pendingSince = time.Time{}
+		if state.isStale {
+			if now.Sub(state.staleLastNotified) >= am.RenotifyAfter {
+				am.dispatch(am.buildStaleAlert(state.metricName, true, missingFor))
+				state.staleLastNotified = now
+			}
+			continue
+		}
+
+		am.dispatch(am.buildStaleAlert(state.metricName, true, missingFor))
+		state.isStale = true
+		state.staleLastNotified = now
 	}
 }

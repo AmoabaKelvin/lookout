@@ -28,14 +28,22 @@ func newTestManager(rules []Rule, renotify time.Duration) (*AlertManager, *captu
 	return am, cap, &clock
 }
 
+func newStaleTestManager(staleAfter time.Duration) (*AlertManager, *captureNotifier, *time.Time) {
+	am, cap, clock := newTestManager([]Rule{memRule(2 * time.Minute)}, 10*time.Minute)
+	am.StaleAfter = staleAfter
+	am.Tracked = []TrackedMetric{{RuleID: "memory", Name: "memory.used_percent"}}
+	return am, cap, clock
+}
+
 func memRule(forDur time.Duration) Rule {
 	return Rule{
-		ID:        "memory",
-		Matcher:   memMatcher,
-		Threshold: 80,
-		Message:   "High memory usage",
-		Severity:  SeverityCritical,
-		For:       forDur,
+		ID:           "memory",
+		Matcher:      memMatcher,
+		Threshold:    80,
+		ResolveBelow: 80,
+		Message:      "High memory usage",
+		Severity:     SeverityCritical,
+		For:          forDur,
 	}
 }
 
@@ -155,6 +163,21 @@ func TestResolveBelowPreventsFlappingNearThreshold(t *testing.T) {
 	}
 }
 
+func TestResolveBelowZeroIsValid(t *testing.T) {
+	am, cap, _ := newTestManager([]Rule{memRuleWithResolveBelow(0, 0)}, time.Hour)
+
+	am.Evaluate(memSample(81))
+	am.Evaluate(memSample(0.1))
+	if len(cap.alerts) != 1 {
+		t.Fatalf("expected alert to stay firing above zero resolve threshold, got %+v", cap.alerts)
+	}
+
+	am.Evaluate(memSample(0))
+	if len(cap.alerts) != 2 || cap.alerts[1].IsFiring {
+		t.Fatalf("expected alert to resolve at zero, got %+v", cap.alerts)
+	}
+}
+
 func TestRecoveryBandDoesNotRenotify(t *testing.T) {
 	am, cap, clock := newTestManager([]Rule{memRuleWithResolveBelow(0, 75)}, 10*time.Minute)
 
@@ -191,8 +214,8 @@ func TestRenotifyAfter(t *testing.T) {
 // TestTwoRulesSameMetricIndependent guards the #20 fix: two rules matching the
 // same metric must keep separate state instead of sharing one entry.
 func TestTwoRulesSameMetricIndependent(t *testing.T) {
-	warn := Rule{ID: "mem-warn", Matcher: memMatcher, Threshold: 80, Message: "warn", Severity: SeverityWarning}
-	crit := Rule{ID: "mem-crit", Matcher: memMatcher, Threshold: 90, Message: "crit", Severity: SeverityCritical}
+	warn := Rule{ID: "mem-warn", Matcher: memMatcher, Threshold: 80, ResolveBelow: 80, Message: "warn", Severity: SeverityWarning}
+	crit := Rule{ID: "mem-crit", Matcher: memMatcher, Threshold: 90, ResolveBelow: 90, Message: "crit", Severity: SeverityCritical}
 	am, cap, _ := newTestManager([]Rule{warn, crit}, time.Hour)
 
 	am.Evaluate(memSample(85)) // over warn(80), under crit(90)
@@ -203,5 +226,72 @@ func TestTwoRulesSameMetricIndependent(t *testing.T) {
 	am.Evaluate(memSample(95)) // now over both; warn already firing, crit fires
 	if len(cap.alerts) != 2 || cap.alerts[1].Severity != SeverityCritical {
 		t.Fatalf("expected the critical to fire independently, got %+v", cap.alerts)
+	}
+}
+
+func TestExpectedMetricStaleWhenNeverSeen(t *testing.T) {
+	am, cap, clock := newStaleTestManager(time.Minute)
+
+	am.CheckStale() // starts the missing clock
+	*clock = clock.Add(59 * time.Second)
+	am.CheckStale()
+	if len(cap.alerts) != 0 {
+		t.Fatalf("expected no stale alert before timeout, got %+v", cap.alerts)
+	}
+
+	*clock = clock.Add(time.Second)
+	am.CheckStale()
+	if len(cap.alerts) != 1 || !cap.alerts[0].IsFiring {
+		t.Fatalf("expected stale firing alert, got %+v", cap.alerts)
+	}
+	if cap.alerts[0].Title != "Metric not reporting" || cap.alerts[0].Metric != "memory.used_percent" {
+		t.Fatalf("unexpected stale alert: %+v", cap.alerts[0])
+	}
+}
+
+func TestStaleMetricResolvesWhenSampleReturns(t *testing.T) {
+	am, cap, clock := newStaleTestManager(time.Minute)
+
+	am.CheckStale()
+	*clock = clock.Add(time.Minute)
+	am.CheckStale()
+	am.Evaluate(memSample(50))
+
+	if len(cap.alerts) != 2 {
+		t.Fatalf("expected stale firing + resolved, got %+v", cap.alerts)
+	}
+	if cap.alerts[1].IsFiring || cap.alerts[1].Title != "Metric reporting restored" {
+		t.Fatalf("expected stale resolved alert, got %+v", cap.alerts[1])
+	}
+}
+
+func TestSeenMetricBecomesStale(t *testing.T) {
+	am, cap, clock := newStaleTestManager(time.Minute)
+
+	am.Evaluate(memSample(50))
+	*clock = clock.Add(time.Minute)
+	am.CheckStale()
+
+	if len(cap.alerts) != 1 || !cap.alerts[0].IsFiring {
+		t.Fatalf("expected seen metric to become stale, got %+v", cap.alerts)
+	}
+}
+
+func TestStaleMetricRenotifiesAfterBudget(t *testing.T) {
+	am, cap, clock := newStaleTestManager(time.Minute)
+
+	am.Evaluate(memSample(50))
+	*clock = clock.Add(time.Minute)
+	am.CheckStale()
+	*clock = clock.Add(9 * time.Minute)
+	am.CheckStale()
+	if len(cap.alerts) != 1 {
+		t.Fatalf("expected no stale renotify before budget, got %+v", cap.alerts)
+	}
+
+	*clock = clock.Add(time.Minute)
+	am.CheckStale()
+	if len(cap.alerts) != 2 || !cap.alerts[1].IsFiring {
+		t.Fatalf("expected stale renotify after budget, got %+v", cap.alerts)
 	}
 }

@@ -17,6 +17,12 @@ import (
 // version is set at build time via -ldflags "-X main.version=...".
 var version = "dev"
 
+type evaluatorEvent struct {
+	sample     MetricSample
+	hasSample  bool
+	checkStale bool
+}
+
 func main() {
 	configPath := flag.String("config", defaultConfigPath, "path to the config file")
 	flag.Parse()
@@ -58,6 +64,8 @@ func main() {
 	}
 
 	alertManager := NewAlertManager(rules, cfg.Alerts.RenotifyAfter.Std(), cfg.Hostname, notifiers)
+	alertManager.StaleAfter = cfg.Alerts.StaleAfter.Std()
+	alertManager.Tracked = trackedMetrics(cfg)
 
 	// only build the docker client when enabled; client.New would otherwise fail startup
 	var cli *client.Client
@@ -93,7 +101,7 @@ func main() {
 		}()
 	}
 
-	incomingSamplesChannel := make(chan MetricSample, 100)
+	evaluatorEvents := make(chan evaluatorEvent, 100)
 	dockerEventsChannel := make(chan DockerEvent, 100)
 	dockerEventsEvaluationChannel := make(chan string, 100)
 	containers := make(map[string]*ContainerState)
@@ -102,11 +110,16 @@ func main() {
 	go func() {
 		for {
 			select {
-			case metric, ok := <-incomingSamplesChannel:
+			case event, ok := <-evaluatorEvents:
 				if !ok {
 					return
 				}
-				alertManager.Evaluate(metric)
+				if event.hasSample {
+					alertManager.Evaluate(event.sample)
+				}
+				if event.checkStale {
+					alertManager.CheckStale()
+				}
 
 			case dockerEvent, ok := <-dockerEventsChannel:
 				if !ok {
@@ -137,7 +150,7 @@ func main() {
 			fmt.Printf("Error collecting memory info: %v\n", err)
 		} else {
 			for _, d := range data {
-				incomingSamplesChannel <- d
+				evaluatorEvents <- evaluatorEvent{sample: d, hasSample: true}
 			}
 		}
 
@@ -146,9 +159,11 @@ func main() {
 			fmt.Printf("Error collecting disk info: %v\n", err)
 		} else {
 			for _, d := range diskData {
-				incomingSamplesChannel <- d
+				evaluatorEvents <- evaluatorEvent{sample: d, hasSample: true}
 			}
 		}
+
+		evaluatorEvents <- evaluatorEvent{checkStale: true}
 	}
 
 	ticker := time.NewTicker(cfg.CollectionInterval.Std())
@@ -164,6 +179,19 @@ func main() {
 			collect()
 		}
 	}
+}
+
+func trackedMetrics(cfg Config) []TrackedMetric {
+	tracked := []TrackedMetric{
+		{RuleID: "memory", Name: "memory.used_percent"},
+	}
+	for _, mount := range cfg.Alerts.Disk.Mounts {
+		tracked = append(tracked, TrackedMetric{
+			RuleID: "disk",
+			Name:   "disk." + mountPointToName(mount) + ".used_percent",
+		})
+	}
+	return tracked
 }
 
 // buildNotifiers maps the configured notifier sections to live notifiers. A nil

@@ -78,12 +78,15 @@ collection_interval: 30s
 
 alerts:
   renotify_after: 1h
+  stale_after: 90s
   memory:
     threshold: 85
+    resolve_below: 80
     for: 2m
     severity: critical
   disk:
     threshold: 85
+    resolve_below: 80
     for: 2m
     severity: warning
     mounts:

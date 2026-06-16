@@ -42,6 +42,7 @@ type Config struct {
 
 type AlertsConfig struct {
 	RenotifyAfter Duration     `yaml:"renotify_after"`
+	StaleAfter    Duration     `yaml:"stale_after"`
 	Memory        MemoryConfig `yaml:"memory"`
 	Disk          DiskConfig   `yaml:"disk"`
 }
@@ -158,6 +159,7 @@ func (c *Config) validate() {
 	clampInterval(&c.CollectionInterval, 30*time.Second, "collection_interval")
 	clampInterval(&c.Heartbeat.Interval, 60*time.Second, "heartbeat.interval")
 	clampInterval(&c.Alerts.RenotifyAfter, time.Hour, "alerts.renotify_after")
+	defaultStaleAfter(&c.Alerts.StaleAfter, 3*c.CollectionInterval.Std())
 
 	clampThreshold(&c.Alerts.Memory.Threshold, "alerts.memory.threshold")
 	clampThreshold(&c.Alerts.Disk.Threshold, "alerts.disk.threshold")
@@ -174,6 +176,12 @@ func (c *Config) validate() {
 func clampInterval(d *Duration, fallback time.Duration, name string) {
 	if d.Std() <= 0 {
 		log.Printf("config: %s must be positive; using %s", name, fallback)
+		*d = Duration(fallback)
+	}
+}
+
+func defaultStaleAfter(d *Duration, fallback time.Duration) {
+	if d.Std() <= 0 {
 		*d = Duration(fallback)
 	}
 }
