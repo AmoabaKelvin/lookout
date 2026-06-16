@@ -100,12 +100,13 @@ type GenericConfig struct {
 }
 
 type EmailConfig struct {
-	Host     string   `yaml:"host"`
-	Port     int      `yaml:"port"`
-	Username string   `yaml:"username"`
-	Password string   `yaml:"password"`
-	From     string   `yaml:"from"`
-	To       []string `yaml:"to"`
+	Host        string   `yaml:"host"`
+	Port        int      `yaml:"port"`
+	ImplicitTLS bool     `yaml:"implicit_tls"`
+	Username    string   `yaml:"username"`
+	Password    string   `yaml:"password"`
+	From        string   `yaml:"from"`
+	To          []string `yaml:"to"`
 }
 
 type HeartbeatConfig struct {

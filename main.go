@@ -276,7 +276,7 @@ func buildNotifiers(cfg NotifiersConfig) ([]Notifier, []string, error) {
 			return nil, nil, err
 		}
 		notifiers = append(notifiers, &SMTPNotifier{
-			Host: n.Host, Port: n.Port,
+			Host: n.Host, Port: n.Port, ImplicitTLS: n.ImplicitTLS,
 			Username: n.Username, Password: n.Password,
 			From: n.From, To: n.To,
 		})

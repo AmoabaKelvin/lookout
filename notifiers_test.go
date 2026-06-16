@@ -1,10 +1,19 @@
 package main
 
 import (
+	"bufio"
 	"context"
+	"crypto/rand"
+	"crypto/rsa"
+	"crypto/tls"
+	"crypto/x509"
+	"crypto/x509/pkix"
 	"encoding/json"
+	"encoding/pem"
 	"errors"
 	"io"
+	"math/big"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -129,10 +138,11 @@ func TestBuildNotifiersValidatesAndReturnsActiveNames(t *testing.T) {
 		Webhook:  &GenericConfig{URL: "https://example.com/lookout"},
 		Telegram: &TelegramConfig{BotToken: "token", ChatID: "chat"},
 		Email: &EmailConfig{
-			Host: "smtp.example.com",
-			Port: 587,
-			From: "lookout@example.com",
-			To:   []string{"ops@example.com"},
+			Host:        "smtp.example.com",
+			Port:        587,
+			ImplicitTLS: true,
+			From:        "lookout@example.com",
+			To:          []string{"ops@example.com"},
 		},
 	})
 	if err != nil {
@@ -143,6 +153,10 @@ func TestBuildNotifiersValidatesAndReturnsActiveNames(t *testing.T) {
 	}
 	if got := strings.Join(active, ","); got != "slack,webhook,telegram,email" {
 		t.Fatalf("active notifiers = %q", got)
+	}
+	smtpNotifier, ok := notifiers[3].(*SMTPNotifier)
+	if !ok || !smtpNotifier.ImplicitTLS {
+		t.Fatalf("email notifier did not keep implicit TLS setting: %#v", notifiers[3])
 	}
 }
 
@@ -322,6 +336,150 @@ func TestTelegramNotifierPayload(t *testing.T) {
 	if !strings.Contains(text, "High memory usage") {
 		t.Fatalf("text %q missing alert title", text)
 	}
+}
+
+func TestSMTPNotifierSendsWithImplicitTLS(t *testing.T) {
+	host, port, messages, closeServer := startImplicitTLSSMTPServer(t)
+	defer closeServer()
+	originalTLSConfig := smtpTLSConfig
+	smtpTLSConfig = func(host string) *tls.Config {
+		return &tls.Config{MinVersion: tls.VersionTLS12, ServerName: host, InsecureSkipVerify: true}
+	}
+	t.Cleanup(func() { smtpTLSConfig = originalTLSConfig })
+
+	err := (&SMTPNotifier{
+		Host:        host,
+		Port:        port,
+		ImplicitTLS: true,
+		From:        "lookout@example.com",
+		To:          []string{"ops@example.com"},
+	}).Send(notifierTestAlert())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	select {
+	case msg := <-messages:
+		if !strings.Contains(msg, "High memory usage") {
+			t.Fatalf("message missing alert title: %q", msg)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for SMTP message")
+	}
+}
+
+func TestSMTPNotifierPort465UsesImplicitTLS(t *testing.T) {
+	notifier := &SMTPNotifier{Port: 465}
+	if !notifier.usesImplicitTLS() {
+		t.Fatal("port 465 should use implicit TLS")
+	}
+}
+
+func startImplicitTLSSMTPServer(t *testing.T) (string, int, <-chan string, func()) {
+	t.Helper()
+
+	cert := testTLSCertificate(t)
+	listener, err := tls.Listen("tcp", "127.0.0.1:0", &tls.Config{Certificates: []tls.Certificate{cert}})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	messages := make(chan string, 1)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		conn, err := listener.Accept()
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+
+		reader := bufio.NewReader(conn)
+		writer := bufio.NewWriter(conn)
+		writeSMTPLine(t, writer, "220 localhost ESMTP")
+		for {
+			line, err := reader.ReadString('\n')
+			if err != nil {
+				return
+			}
+			cmd := strings.ToUpper(strings.TrimSpace(line))
+			switch {
+			case strings.HasPrefix(cmd, "EHLO"):
+				writeSMTPLine(t, writer, "250 localhost")
+			case strings.HasPrefix(cmd, "MAIL FROM:"):
+				writeSMTPLine(t, writer, "250 OK")
+			case strings.HasPrefix(cmd, "RCPT TO:"):
+				writeSMTPLine(t, writer, "250 OK")
+			case cmd == "DATA":
+				writeSMTPLine(t, writer, "354 End data with <CR><LF>.<CR><LF>")
+				var msg strings.Builder
+				for {
+					line, err := reader.ReadString('\n')
+					if err != nil {
+						return
+					}
+					if strings.TrimSpace(line) == "." {
+						break
+					}
+					msg.WriteString(line)
+				}
+				messages <- msg.String()
+				writeSMTPLine(t, writer, "250 OK")
+			case cmd == "QUIT":
+				writeSMTPLine(t, writer, "221 Bye")
+				return
+			default:
+				writeSMTPLine(t, writer, "250 OK")
+			}
+		}
+	}()
+
+	addr := listener.Addr().(*net.TCPAddr)
+	return "127.0.0.1", addr.Port, messages, func() {
+		listener.Close()
+		<-done
+	}
+}
+
+func writeSMTPLine(t *testing.T, writer *bufio.Writer, line string) {
+	t.Helper()
+	if _, err := writer.WriteString(line + "\r\n"); err != nil {
+		t.Fatal(err)
+	}
+	if err := writer.Flush(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func testTLSCertificate(t *testing.T) tls.Certificate {
+	t.Helper()
+
+	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatal(err)
+	}
+	template := x509.Certificate{
+		SerialNumber: big.NewInt(1),
+		Subject:      pkix.Name{CommonName: "127.0.0.1"},
+		NotBefore:    time.Now().Add(-time.Hour),
+		NotAfter:     time.Now().Add(time.Hour),
+		KeyUsage:     x509.KeyUsageDigitalSignature | x509.KeyUsageKeyEncipherment,
+		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+		IPAddresses:  []net.IP{net.ParseIP("127.0.0.1")},
+	}
+	certDER, err := x509.CreateCertificate(rand.Reader, &template, &template, &key.PublicKey, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	keyDER := x509.MarshalPKCS1PrivateKey(key)
+
+	certPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: certDER})
+	keyPEM := pem.EncodeToMemory(&pem.Block{Type: "RSA PRIVATE KEY", Bytes: keyDER})
+	cert, err := tls.X509KeyPair(certPEM, keyPEM)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return cert
 }
 
 type captureTransport struct {

@@ -1,23 +1,54 @@
 package main
 
 import (
+	"crypto/tls"
 	"fmt"
+	"net"
 	"net/smtp"
 	"strings"
+	"time"
 )
 
-// SMTPNotifier sends alerts as HTML email over STARTTLS (port 587 style).
-// Implicit-TLS servers (port 465) are tracked in issue #12.
+// SMTPNotifier sends alerts as HTML email over SMTP. Port 465, or an explicit
+// ImplicitTLS setting, uses TLS from the first byte; other ports use smtp.SendMail.
 type SMTPNotifier struct {
-	Host     string
-	Port     int
-	Username string
-	Password string
-	From     string
-	To       []string
+	Host        string
+	Port        int
+	ImplicitTLS bool
+	Username    string
+	Password    string
+	From        string
+	To          []string
+}
+
+var smtpTLSConfig = func(host string) *tls.Config {
+	return &tls.Config{
+		MinVersion: tls.VersionTLS12,
+		ServerName: host,
+	}
 }
 
 func (s *SMTPNotifier) Send(alert Alert) error {
+	if s.usesImplicitTLS() {
+		return s.sendImplicitTLS(alert)
+	}
+
+	addr := fmt.Sprintf("%s:%d", s.Host, s.Port)
+	return smtp.SendMail(addr, s.auth(), s.From, s.To, s.message(alert))
+}
+
+func (s *SMTPNotifier) usesImplicitTLS() bool {
+	return s.ImplicitTLS || s.Port == 465
+}
+
+func (s *SMTPNotifier) auth() smtp.Auth {
+	if s.Username == "" {
+		return nil
+	}
+	return smtp.PlainAuth("", s.Username, s.Password, s.Host)
+}
+
+func (s *SMTPNotifier) message(alert Alert) []byte {
 	v := visualFor(alert)
 	subject := fmt.Sprintf("[%s] %s — %s", v.label, alert.Hostname, alert.Title)
 
@@ -30,9 +61,53 @@ func (s *SMTPNotifier) Send(alert Alert) error {
 	msg.WriteString("\r\n")
 	msg.WriteString(smtpHTMLBody(alert, v))
 
+	return []byte(msg.String())
+}
+
+func (s *SMTPNotifier) sendImplicitTLS(alert Alert) error {
 	addr := fmt.Sprintf("%s:%d", s.Host, s.Port)
-	auth := smtp.PlainAuth("", s.Username, s.Password, s.Host)
-	return smtp.SendMail(addr, auth, s.From, s.To, []byte(msg.String()))
+	dialer := &net.Dialer{Timeout: 10 * time.Second}
+	conn, err := tls.DialWithDialer(dialer, "tcp", addr, smtpTLSConfig(s.Host))
+	if err != nil {
+		return err
+	}
+
+	client, err := smtp.NewClient(conn, s.Host)
+	if err != nil {
+		conn.Close()
+		return err
+	}
+	defer client.Close()
+
+	if auth := s.auth(); auth != nil {
+		if ok, _ := client.Extension("AUTH"); !ok {
+			return fmt.Errorf("smtp server %s does not advertise AUTH", s.Host)
+		}
+		if err := client.Auth(auth); err != nil {
+			return err
+		}
+	}
+	if err := client.Mail(s.From); err != nil {
+		return err
+	}
+	for _, recipient := range s.To {
+		if err := client.Rcpt(recipient); err != nil {
+			return err
+		}
+	}
+
+	writer, err := client.Data()
+	if err != nil {
+		return err
+	}
+	if _, err := writer.Write(s.message(alert)); err != nil {
+		writer.Close()
+		return err
+	}
+	if err := writer.Close(); err != nil {
+		return err
+	}
+	return client.Quit()
 }
 
 // emailColors returns an accessible palette for the email keyed off the alert

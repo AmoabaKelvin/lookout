@@ -118,6 +118,7 @@ notifiers:
   # email:
   #   host: "smtp.example.com"
   #   port: 587
+  #   implicit_tls: false
   #   username: ""
   #   password: ""
   #   from: "lookout@example.com"
