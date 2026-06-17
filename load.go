@@ -8,7 +8,7 @@ import (
 	"time"
 )
 
-func loadCollector(path string) ([]MetricSample, error) {
+func loadCollector(path string, cores int) ([]MetricSample, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil, fmt.Errorf("failed to read %s: %w", path, err)
@@ -27,11 +27,17 @@ func loadCollector(path string) ([]MetricSample, error) {
 		}
 		loads[i] = load
 	}
+	if cores < 1 {
+		cores = 1
+	}
 
 	collectedAt := time.Now()
 	return []MetricSample{
 		{Name: "load.1", Value: loads[0], Unit: "load", Timestamp: collectedAt, Collector: "load"},
 		{Name: "load.5", Value: loads[1], Unit: "load", Timestamp: collectedAt, Collector: "load"},
 		{Name: "load.15", Value: loads[2], Unit: "load", Timestamp: collectedAt, Collector: "load"},
+		{Name: "load.1_per_core", Value: loads[0] / float64(cores), Unit: "load/core", Timestamp: collectedAt, Collector: "load"},
+		{Name: "load.5_per_core", Value: loads[1] / float64(cores), Unit: "load/core", Timestamp: collectedAt, Collector: "load"},
+		{Name: "load.15_per_core", Value: loads[2] / float64(cores), Unit: "load/core", Timestamp: collectedAt, Collector: "load"},
 	}, nil
 }
