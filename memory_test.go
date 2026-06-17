@@ -43,10 +43,17 @@ func TestMemoryCollectorParsesMemInfo(t *testing.T) {
 	assertFloatNear(t, values["memory.available"], 7638540)
 	assertFloatNear(t, values["memory.used"], 547172)
 	assertFloatNear(t, values["memory.used_percent"], 6.684474)
+	assertFloatNear(t, values["swap.total"], 9234280)
+	assertFloatNear(t, values["swap.free"], 9234280)
+	assertFloatNear(t, values["swap.used"], 0)
+	assertFloatNear(t, values["swap.used_percent"], 0)
 
 	for _, sample := range samples {
-		if sample.Collector != "memory" {
+		if strings.HasPrefix(sample.Name, "memory.") && sample.Collector != "memory" {
 			t.Fatalf("%s collector = %q, want memory", sample.Name, sample.Collector)
+		}
+		if strings.HasPrefix(sample.Name, "swap.") && sample.Collector != "swap" {
+			t.Fatalf("%s collector = %q, want swap", sample.Name, sample.Collector)
 		}
 		if sample.Timestamp.IsZero() {
 			t.Fatalf("%s timestamp was not set", sample.Name)
@@ -72,6 +79,7 @@ Shmem: 75 kB
 	assertFloatNear(t, values["memory.available"], 400)
 	assertFloatNear(t, values["memory.used"], 600)
 	assertFloatNear(t, values["memory.used_percent"], 60)
+	assertFloatNear(t, values["swap.used_percent"], 0)
 }
 
 func TestMemoryCollectorMissingRequiredFieldErrors(t *testing.T) {

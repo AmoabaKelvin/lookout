@@ -38,37 +38,78 @@ func memoryCollector(path string) ([]MetricSample, error) {
 		memAvailable = memTotal
 	}
 
-	timeCollected := time.Now()
+	collectedAt := time.Now()
 	memUsed := memTotal - memAvailable
+	swapTotal := memInfo["SwapTotal"]
+	swapFree := memInfo["SwapFree"]
+	if swapFree < 0 {
+		swapFree = 0
+	}
+	if swapFree > swapTotal {
+		swapFree = swapTotal
+	}
+	swapUsed := swapTotal - swapFree
+	var swapUsedPercent float64
+	if swapTotal > 0 {
+		swapUsedPercent = (swapUsed / swapTotal) * 100
+	}
 
 	return []MetricSample{
 		{
 			Name:      "memory.total",
 			Value:     memTotal,
 			Unit:      "kB",
-			Timestamp: timeCollected,
+			Timestamp: collectedAt,
 			Collector: "memory",
 		},
 		{
 			Name:      "memory.used_percent",
 			Value:     (memUsed / memTotal) * 100,
 			Unit:      "percent",
-			Timestamp: timeCollected,
+			Timestamp: collectedAt,
 			Collector: "memory",
 		},
 		{
 			Name:      "memory.available",
 			Value:     memAvailable,
 			Unit:      "kB",
-			Timestamp: timeCollected,
+			Timestamp: collectedAt,
 			Collector: "memory",
 		},
 		{
 			Name:      "memory.used",
 			Value:     memUsed,
 			Unit:      "kB",
-			Timestamp: timeCollected,
+			Timestamp: collectedAt,
 			Collector: "memory",
+		},
+		{
+			Name:      "swap.total",
+			Value:     swapTotal,
+			Unit:      "kB",
+			Timestamp: collectedAt,
+			Collector: "swap",
+		},
+		{
+			Name:      "swap.used_percent",
+			Value:     swapUsedPercent,
+			Unit:      "percent",
+			Timestamp: collectedAt,
+			Collector: "swap",
+		},
+		{
+			Name:      "swap.free",
+			Value:     swapFree,
+			Unit:      "kB",
+			Timestamp: collectedAt,
+			Collector: "swap",
+		},
+		{
+			Name:      "swap.used",
+			Value:     swapUsed,
+			Unit:      "kB",
+			Timestamp: collectedAt,
+			Collector: "swap",
 		},
 	}, nil
 }
@@ -77,10 +118,8 @@ func parseMemInfo(data []byte, source string) (map[string]float64, error) {
 	memInfo := make(map[string]float64)
 
 	// /proc/meminfo lines look like "MemTotal:  8185712 kB"
-	parts := strings.SplitSeq(string(data), "\n")
-	lineNumber := 0
-	for part := range parts {
-		lineNumber++
+	for i, part := range strings.Split(string(data), "\n") {
+		lineNumber := i + 1
 		if part == "" {
 			continue
 		}
@@ -119,17 +158,25 @@ func memAvailableValue(memInfo map[string]float64, source string) (float64, erro
 		return value, nil
 	}
 
-	memFree, err := requiredMemInfoValue(memInfo, "MemFree", source)
-	if err != nil {
-		return 0, fmt.Errorf("%s: missing MemAvailable and fallback field MemFree", source)
+	fallback := func(key string) (float64, error) {
+		value, err := requiredMemInfoValue(memInfo, key, source)
+		if err != nil {
+			return 0, fmt.Errorf("%s: MemAvailable missing and fallback field %s unavailable: %w", source, key, err)
+		}
+		return value, nil
 	}
-	buffers, err := requiredMemInfoValue(memInfo, "Buffers", source)
+
+	memFree, err := fallback("MemFree")
 	if err != nil {
-		return 0, fmt.Errorf("%s: missing MemAvailable and fallback field Buffers", source)
+		return 0, err
 	}
-	cached, err := requiredMemInfoValue(memInfo, "Cached", source)
+	buffers, err := fallback("Buffers")
 	if err != nil {
-		return 0, fmt.Errorf("%s: missing MemAvailable and fallback field Cached", source)
+		return 0, err
+	}
+	cached, err := fallback("Cached")
+	if err != nil {
+		return 0, err
 	}
 
 	sReclaimable := memInfo["SReclaimable"]
