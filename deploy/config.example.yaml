@@ -18,14 +18,16 @@ alerts:
     resolve_below: 80
     for: 2m
     severity: warning
+    predict_full_within: 4h
     mounts:
       - /
       # Add any other mount points you want monitored, e.g.:
       # - /var
       # - /mnt/data
   load:
-    threshold: 4
-    resolve_below: 3
+    # 1-minute load average divided by CPU cores.
+    threshold: 1.5
+    resolve_below: 1.0
     for: 2m
     severity: warning
   cpu:

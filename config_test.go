@@ -43,11 +43,14 @@ func TestLoadConfigDefaults(t *testing.T) {
 	if cfg.Alerts.Disk.For.Std() != 2*time.Minute {
 		t.Errorf("disk for: got %s", cfg.Alerts.Disk.For.Std())
 	}
-	if cfg.Alerts.Load.Threshold != 4 {
+	if cfg.Alerts.Load.Threshold != 1.5 {
 		t.Errorf("load threshold: got %v", cfg.Alerts.Load.Threshold)
 	}
-	if cfg.Alerts.Load.ResolveBelow == nil || *cfg.Alerts.Load.ResolveBelow != 3 {
+	if cfg.Alerts.Load.ResolveBelow == nil || *cfg.Alerts.Load.ResolveBelow != 1 {
 		t.Errorf("load resolve below: got %v", cfg.Alerts.Load.ResolveBelow)
+	}
+	if cfg.Alerts.Disk.PredictFullWithin.Std() != 4*time.Hour {
+		t.Errorf("disk predict_full_within: got %s", cfg.Alerts.Disk.PredictFullWithin.Std())
 	}
 	if cfg.Alerts.CPU.Threshold != 85 {
 		t.Errorf("cpu threshold: got %v", cfg.Alerts.CPU.Threshold)
@@ -98,6 +101,7 @@ alerts:
   disk:
     threshold: 70
     resolve_below: 65
+    predict_full_within: 8h
     mounts:
       - /
       - /data
@@ -182,6 +186,9 @@ docker:
 	}
 	if got := cfg.Alerts.Disk.Mounts; len(got) != 2 || got[1] != "/data" {
 		t.Errorf("mounts override: got %v", got)
+	}
+	if cfg.Alerts.Disk.PredictFullWithin.Std() != 8*time.Hour {
+		t.Errorf("disk predict_full_within override: got %s", cfg.Alerts.Disk.PredictFullWithin.Std())
 	}
 	if cfg.Alerts.Load.Threshold != 8 || cfg.Alerts.Load.For.Std() != time.Minute {
 		t.Errorf("load overrides not applied: %+v", cfg.Alerts.Load)
@@ -327,7 +334,7 @@ docker:
 	if cfg.Alerts.Disk.Severity != SeverityWarning {
 		t.Errorf("invalid severity should fall back, got %s", cfg.Alerts.Disk.Severity)
 	}
-	if cfg.Alerts.Load.Threshold != 4 {
+	if cfg.Alerts.Load.Threshold != 1.5 {
 		t.Errorf("non-positive load threshold should fall back, got %v", cfg.Alerts.Load.Threshold)
 	}
 	if cfg.Alerts.Load.Severity != SeverityWarning {
@@ -395,8 +402,8 @@ alerts:
 	if cfg.Alerts.Disk.ResolveBelow == nil || *cfg.Alerts.Disk.ResolveBelow != 0 {
 		t.Errorf("resolve_below above threshold should fall back to threshold-5 clamped at 0, got %v", cfg.Alerts.Disk.ResolveBelow)
 	}
-	if cfg.Alerts.Load.ResolveBelow == nil || *cfg.Alerts.Load.ResolveBelow != 7 {
-		t.Errorf("missing load resolve_below should default to threshold-1, got %v", cfg.Alerts.Load.ResolveBelow)
+	if cfg.Alerts.Load.ResolveBelow == nil || *cfg.Alerts.Load.ResolveBelow != 7.5 {
+		t.Errorf("missing load resolve_below should default to threshold-0.5, got %v", cfg.Alerts.Load.ResolveBelow)
 	}
 	if cfg.Alerts.CPU.ResolveBelow == nil || *cfg.Alerts.CPU.ResolveBelow != 65 {
 		t.Errorf("missing cpu resolve_below should default to threshold-5, got %v", cfg.Alerts.CPU.ResolveBelow)

@@ -8,6 +8,7 @@ import (
 	"net/url"
 	"os"
 	"os/signal"
+	"runtime"
 	"strings"
 	"syscall"
 	"time"
@@ -93,10 +94,10 @@ func main() {
 		},
 		{
 			ID:           "load",
-			Matcher:      func(s MetricSample) bool { return s.Name == "load.1" },
+			Matcher:      func(s MetricSample) bool { return s.Name == "load.1_per_core" },
 			Threshold:    cfg.Alerts.Load.Threshold,
 			ResolveBelow: *cfg.Alerts.Load.ResolveBelow,
-			Message:      "High 1-minute load average",
+			Message:      "High 1-minute load per core",
 			Severity:     cfg.Alerts.Load.Severity,
 			For:          cfg.Alerts.Load.For.Std(),
 		},
@@ -118,6 +119,19 @@ func main() {
 			Severity:     cfg.Alerts.Swap.Severity,
 			For:          cfg.Alerts.Swap.For.Std(),
 		},
+	}
+	if cfg.Alerts.Disk.PredictFullWithin.Std() > 0 {
+		rules = append(rules, Rule{
+			ID: "disk-fill",
+			Matcher: func(s MetricSample) bool {
+				return s.Collector == "disk" && strings.HasSuffix(s.Name, ".fills_within_window")
+			},
+			Threshold:    0,
+			ResolveBelow: 0,
+			Message:      "Disk predicted to fill soon",
+			Severity:     cfg.Alerts.Disk.Severity,
+			For:          cfg.Alerts.Disk.For.Std(),
+		})
 	}
 	for _, family := range checkFamilies(cfg) {
 		for _, dc := range family.derived() {
@@ -257,6 +271,7 @@ func main() {
 	}
 
 	var cpuPrevious *cpuTimes
+	diskPredictor := newDiskFillPredictor()
 	publish := func(samples []MetricSample) {
 		for _, d := range samples {
 			evaluatorEvents <- evaluatorEvent{sample: d, hasSample: true}
@@ -274,9 +289,14 @@ func main() {
 		emit("memory", memData, err)
 
 		diskData, err := diskCollector(procMounts, cfg.Alerts.Disk.Mounts)
-		emit("disk", diskData, err)
+		if err != nil {
+			fmt.Printf("Error collecting disk info: %v\n", err)
+		} else {
+			publish(diskData)
+			publish(diskPredictor.collect(diskData, cfg.Alerts.Disk.PredictFullWithin.Std()))
+		}
 
-		loadData, err := loadCollector(procLoadavg)
+		loadData, err := loadCollector(procLoadavg, runtime.NumCPU())
 		emit("load", loadData, err)
 
 		// CPU is the one collector that threads state (cpuPrevious) between runs.
@@ -314,15 +334,22 @@ func main() {
 func trackedMetrics(cfg Config) []TrackedMetric {
 	tracked := []TrackedMetric{
 		{RuleID: "memory", Name: "memory.used_percent"},
-		{RuleID: "load", Name: "load.1"},
+		{RuleID: "load", Name: "load.1_per_core"},
 		{RuleID: "cpu", Name: "cpu.used_percent"},
 		{RuleID: "swap", Name: "swap.used_percent"},
 	}
 	for _, mount := range cfg.Alerts.Disk.Mounts {
+		name := mountPointToName(mount)
 		tracked = append(tracked, TrackedMetric{
 			RuleID: "disk",
-			Name:   "disk." + mountPointToName(mount) + ".used_percent",
+			Name:   "disk." + name + ".used_percent",
 		})
+		if cfg.Alerts.Disk.PredictFullWithin.Std() > 0 {
+			tracked = append(tracked, TrackedMetric{
+				RuleID: "disk-fill",
+				Name:   "disk." + name + ".fills_within_window",
+			})
+		}
 	}
 	for _, family := range checkFamilies(cfg) {
 		for _, dc := range family.derived() {
