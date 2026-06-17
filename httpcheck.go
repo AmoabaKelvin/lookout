@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -18,28 +19,18 @@ func httpCollector(checks []HTTPCheckConfig) []MetricSample {
 		if name == "" {
 			name = check.URL
 		}
-		value := float64(0)
-		if err := runHTTPCheck(check); err != nil {
-			value = 1
-		}
-		samples = append(samples, MetricSample{
-			Name:      "http." + safeMetricPart(name) + ".unhealthy",
-			Value:     value,
-			Unit:      "state",
-			Timestamp: collectedAt,
-			Collector: "http",
-		})
+		samples = append(samples, stateSample("http", name, ".unhealthy", runHTTPCheck(check) != nil, collectedAt))
 	}
 	return samples
 }
 
 func runHTTPCheck(check HTTPCheckConfig) error {
 	if check.URL == "" {
-		return fmt.Errorf("missing url")
+		return errors.New("missing url")
 	}
 	parsed, err := url.Parse(check.URL)
 	if err != nil || parsed.Host == "" || (parsed.Scheme != "http" && parsed.Scheme != "https") {
-		return fmt.Errorf("invalid url")
+		return errors.New("invalid url")
 	}
 
 	timeout := check.Timeout.Std()
@@ -57,7 +48,7 @@ func runHTTPCheck(check HTTPCheckConfig) error {
 		return err
 	}
 	defer resp.Body.Close()
-	io.Copy(io.Discard, resp.Body)
+	_, _ = io.Copy(io.Discard, resp.Body) // drain so the connection can be reused
 	if resp.StatusCode != expectedStatus {
 		return fmt.Errorf("status %d, want %d", resp.StatusCode, expectedStatus)
 	}

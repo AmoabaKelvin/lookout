@@ -18,17 +18,7 @@ func systemdCollector(services []string) []MetricSample {
 		if service == "" {
 			continue
 		}
-		value := float64(0)
-		if err := runSystemctl(service); err != nil {
-			value = 1
-		}
-		samples = append(samples, MetricSample{
-			Name:      "systemd." + safeMetricPart(service) + ".unhealthy",
-			Value:     value,
-			Unit:      "state",
-			Timestamp: collectedAt,
-			Collector: "systemd",
-		})
+		samples = append(samples, stateSample("systemd", service, ".unhealthy", runSystemctl(service) != nil, collectedAt))
 	}
 	return samples
 }

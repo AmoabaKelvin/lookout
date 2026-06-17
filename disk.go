@@ -10,8 +10,8 @@ import (
 )
 
 func diskCollector(path string, targetMounts []string) ([]MetricSample, error) {
-	timeCollected := time.Now()
-	var metricsCollected []MetricSample
+	collectedAt := time.Now()
+	var samples []MetricSample
 
 	mountsData, err := os.ReadFile(path)
 	if err != nil {
@@ -54,20 +54,20 @@ func diskCollector(path string, targetMounts []string) ([]MetricSample, error) {
 		usedPercent := (float64(used) / float64(total)) * 100
 
 		name := mountPointToName(mountPoint)
-		metricsCollected = append(metricsCollected,
-			MetricSample{Name: "disk." + name + ".total", Value: float64(total), Unit: "bytes", Timestamp: timeCollected, Collector: "disk"},
-			MetricSample{Name: "disk." + name + ".used", Value: float64(used), Unit: "bytes", Timestamp: timeCollected, Collector: "disk"},
-			MetricSample{Name: "disk." + name + ".free", Value: float64(free), Unit: "bytes", Timestamp: timeCollected, Collector: "disk"},
-			MetricSample{Name: "disk." + name + ".used_percent", Value: usedPercent, Unit: "percent", Timestamp: timeCollected, Collector: "disk"},
+		samples = append(samples,
+			MetricSample{Name: "disk." + name + ".total", Value: float64(total), Unit: "bytes", Timestamp: collectedAt, Collector: "disk"},
+			MetricSample{Name: "disk." + name + ".used", Value: float64(used), Unit: "bytes", Timestamp: collectedAt, Collector: "disk"},
+			MetricSample{Name: "disk." + name + ".free", Value: float64(free), Unit: "bytes", Timestamp: collectedAt, Collector: "disk"},
+			MetricSample{Name: "disk." + name + ".used_percent", Value: usedPercent, Unit: "percent", Timestamp: collectedAt, Collector: "disk"},
 		)
 	}
 
-	return metricsCollected, nil
+	return samples, nil
 }
 
 func mountPointToName(mp string) string {
 	if mp == "/" {
 		return "root"
 	}
-	return strings.ReplaceAll(strings.TrimPrefix(mp, "/"), "/", "_")
+	return safeMetricPart(strings.TrimPrefix(mp, "/"))
 }
