@@ -20,6 +20,17 @@ var version = "dev"
 
 const notifierQueueSize = 100
 
+// Linux kernel files the collectors parse. These are not user-configurable:
+// each collector parses a kernel-specific format, so the path can only be the
+// real one. The collectors still take a path argument so tests can pass fixtures.
+const (
+	procMeminfo = "/proc/meminfo"
+	procMounts  = "/proc/mounts"
+	procLoadavg = "/proc/loadavg"
+	procStat    = "/proc/stat"
+	procDir     = "/proc"
+)
+
 type evaluatorEvent struct {
 	sample     MetricSample
 	hasSample  bool
@@ -49,6 +60,15 @@ func main() {
 	} else {
 		fmt.Printf("Active notifiers: %s\n", strings.Join(activeNotifiers, ", "))
 	}
+
+	// A malformed heartbeat URL never pings, which silently inverts the
+	// dead-man's switch into a permanent false "down" alert, so fail fast.
+	if cfg.Heartbeat.URL != "" {
+		if err := validateWebhookURL("heartbeat.url", cfg.Heartbeat.URL); err != nil {
+			log.Fatalf("heartbeat: %v", err)
+		}
+	}
+
 	notifierQueue := newAsyncNotifier(notifiers, notifierQueueSize)
 	go notifierQueue.Run(ctx)
 
@@ -89,38 +109,33 @@ func main() {
 			Severity:     cfg.Alerts.CPU.Severity,
 			For:          cfg.Alerts.CPU.For.Std(),
 		},
+		{
+			ID:           "swap",
+			Matcher:      func(s MetricSample) bool { return s.Name == "swap.used_percent" },
+			Threshold:    cfg.Alerts.Swap.Threshold,
+			ResolveBelow: *cfg.Alerts.Swap.ResolveBelow,
+			Message:      "High swap usage",
+			Severity:     cfg.Alerts.Swap.Severity,
+			For:          cfg.Alerts.Swap.For.Std(),
+		},
 	}
-	for _, service := range cfg.Alerts.Systemd.Services {
-		service := service
-		rules = append(rules, Rule{
-			ID:           "systemd-" + safeMetricPart(service),
-			Matcher:      func(s MetricSample) bool { return s.Name == "systemd."+safeMetricPart(service)+".unhealthy" },
-			Threshold:    0,
-			ResolveBelow: 0,
-			Message:      "Systemd service unhealthy: " + service,
-			Severity:     cfg.Alerts.Systemd.Severity,
-		})
-	}
-	for _, check := range cfg.Alerts.HTTP.Checks {
-		checkName := check.Name
-		if checkName == "" {
-			checkName = check.URL
+	for _, family := range checkFamilies(cfg) {
+		for _, dc := range family.derived() {
+			metricName := dc.metricName
+			rules = append(rules, Rule{
+				ID:       dc.ruleID,
+				Matcher:  func(s MetricSample) bool { return s.Name == metricName },
+				Message:  family.message + dc.label,
+				Severity: family.severity,
+			})
 		}
-		rules = append(rules, Rule{
-			ID:           "http-" + safeMetricPart(checkName),
-			Matcher:      func(s MetricSample) bool { return s.Name == "http."+safeMetricPart(checkName)+".unhealthy" },
-			Threshold:    0,
-			ResolveBelow: 0,
-			Message:      "HTTP check unhealthy: " + checkName,
-			Severity:     cfg.Alerts.HTTP.Severity,
-		})
 	}
 
 	alertManager := NewAlertManager(rules, cfg.Alerts.RenotifyAfter.Std(), cfg.Hostname, []Notifier{notifierQueue})
-	alertManager.StateFile = cfg.StateFile
-	alertManager.StaleAfter = cfg.Alerts.StaleAfter.Std()
-	alertManager.Tracked = trackedMetrics(cfg)
-	if err := alertManager.LoadState(cfg.StateFile); err != nil {
+	alertManager.stateFile = cfg.StateFile
+	alertManager.staleAfter = cfg.Alerts.StaleAfter.Std()
+	alertManager.tracked = trackedMetrics(cfg)
+	if err := alertManager.LoadState(); err != nil {
 		log.Fatalf("alert state: %v", err)
 	}
 
@@ -130,8 +145,7 @@ func main() {
 		var err error
 		cli, err = client.New(client.FromEnv)
 		if err != nil {
-			fmt.Printf("failed to create docker client: %v\n", err)
-			os.Exit(1)
+			log.Fatalf("docker: %v", err)
 		}
 		defer cli.Close()
 	}
@@ -239,55 +253,45 @@ func main() {
 	fmt.Printf("Starting lookout %s on %s (Ctrl+C to stop)\n", version, cfg.Hostname)
 
 	if cfg.Docker.Enabled {
-		go dockerCollector(cli, ctx, dockerEventsChannel)
+		go dockerCollector(ctx, cli, dockerEventsChannel)
 	}
 
 	var cpuPrevious *cpuTimes
+	publish := func(samples []MetricSample) {
+		for _, d := range samples {
+			evaluatorEvents <- evaluatorEvent{sample: d, hasSample: true}
+		}
+	}
+	emit := func(label string, samples []MetricSample, err error) {
+		if err != nil {
+			fmt.Printf("Error collecting %s info: %v\n", label, err)
+			return
+		}
+		publish(samples)
+	}
 	collect := func() {
-		data, err := memoryCollector(cfg.Alerts.Memory.Source)
-		if err != nil {
-			fmt.Printf("Error collecting memory info: %v\n", err)
-		} else {
-			for _, d := range data {
-				evaluatorEvents <- evaluatorEvent{sample: d, hasSample: true}
-			}
-		}
+		memData, err := memoryCollector(procMeminfo)
+		emit("memory", memData, err)
 
-		diskData, err := diskCollector(cfg.Alerts.Disk.Source, cfg.Alerts.Disk.Mounts)
-		if err != nil {
-			fmt.Printf("Error collecting disk info: %v\n", err)
-		} else {
-			for _, d := range diskData {
-				evaluatorEvents <- evaluatorEvent{sample: d, hasSample: true}
-			}
-		}
+		diskData, err := diskCollector(procMounts, cfg.Alerts.Disk.Mounts)
+		emit("disk", diskData, err)
 
-		loadData, err := loadCollector(cfg.Alerts.Load.Source)
-		if err != nil {
-			fmt.Printf("Error collecting load info: %v\n", err)
-		} else {
-			for _, d := range loadData {
-				evaluatorEvents <- evaluatorEvent{sample: d, hasSample: true}
-			}
-		}
+		loadData, err := loadCollector(procLoadavg)
+		emit("load", loadData, err)
 
-		cpuData, nextCPU, err := cpuCollector(cfg.Alerts.CPU.Source, cpuPrevious)
+		// CPU is the one collector that threads state (cpuPrevious) between runs.
+		cpuData, nextCPU, err := cpuCollector(procStat, cpuPrevious)
 		if err != nil {
 			fmt.Printf("Error collecting cpu info: %v\n", err)
 		} else {
 			cpuPrevious = nextCPU
-			for _, d := range cpuData {
-				evaluatorEvents <- evaluatorEvent{sample: d, hasSample: true}
-			}
+			publish(cpuData)
 		}
 
-		for _, d := range systemdCollector(cfg.Alerts.Systemd.Services) {
-			evaluatorEvents <- evaluatorEvent{sample: d, hasSample: true}
-		}
-
-		for _, d := range httpCollector(cfg.Alerts.HTTP.Checks) {
-			evaluatorEvents <- evaluatorEvent{sample: d, hasSample: true}
-		}
+		publish(systemdCollector(cfg.Alerts.Systemd.Services))
+		publish(httpCollector(cfg.Alerts.HTTP.Checks))
+		publish(tcpCollector(cfg.Alerts.TCP.Checks))
+		publish(processCollector(procDir, cfg.Alerts.Process.Names))
 
 		evaluatorEvents <- evaluatorEvent{checkStale: true}
 	}
@@ -312,6 +316,7 @@ func trackedMetrics(cfg Config) []TrackedMetric {
 		{RuleID: "memory", Name: "memory.used_percent"},
 		{RuleID: "load", Name: "load.1"},
 		{RuleID: "cpu", Name: "cpu.used_percent"},
+		{RuleID: "swap", Name: "swap.used_percent"},
 	}
 	for _, mount := range cfg.Alerts.Disk.Mounts {
 		tracked = append(tracked, TrackedMetric{
@@ -319,23 +324,82 @@ func trackedMetrics(cfg Config) []TrackedMetric {
 			Name:   "disk." + mountPointToName(mount) + ".used_percent",
 		})
 	}
-	for _, service := range cfg.Alerts.Systemd.Services {
-		tracked = append(tracked, TrackedMetric{
-			RuleID: "systemd-" + safeMetricPart(service),
-			Name:   "systemd." + safeMetricPart(service) + ".unhealthy",
-		})
-	}
-	for _, check := range cfg.Alerts.HTTP.Checks {
-		name := check.Name
-		if name == "" {
-			name = check.URL
+	for _, family := range checkFamilies(cfg) {
+		for _, dc := range family.derived() {
+			tracked = append(tracked, TrackedMetric{RuleID: dc.ruleID, Name: dc.metricName})
 		}
-		tracked = append(tracked, TrackedMetric{
-			RuleID: "http-" + safeMetricPart(name),
-			Name:   "http." + safeMetricPart(name) + ".unhealthy",
-		})
 	}
 	return tracked
+}
+
+// derivedCheck is one name-derived check (a systemd unit, HTTP/TCP check, or
+// process) after its display name has been resolved and sanitized.
+type derivedCheck struct {
+	ruleID     string
+	metricName string
+	label      string
+}
+
+// checkFamily groups name-derived checks that share a metric prefix, suffix,
+// alert message, and severity. items holds {name, fallback} pairs: fallback is
+// used (untrimmed, to match the collector) when name is blank.
+type checkFamily struct {
+	prefix   string
+	suffix   string
+	message  string
+	severity Severity
+	items    []checkItem
+}
+
+type checkItem struct{ name, fallback string }
+
+// derived resolves each item to its rule ID and metric name. The resolution
+// mirrors the collectors exactly so a rule's metric name matches what its
+// collector emits.
+func (f checkFamily) derived() []derivedCheck {
+	var out []derivedCheck
+	for _, it := range f.items {
+		name := strings.TrimSpace(it.name)
+		if name == "" {
+			name = it.fallback
+		}
+		if strings.TrimSpace(name) == "" {
+			continue
+		}
+		part := safeMetricPart(name)
+		out = append(out, derivedCheck{
+			ruleID:     f.prefix + "-" + part,
+			metricName: f.prefix + "." + part + f.suffix,
+			label:      name,
+		})
+	}
+	return out
+}
+
+// checkFamilies returns the name-derived check families configured for cfg.
+func checkFamilies(cfg Config) []checkFamily {
+	systemd := make([]checkItem, len(cfg.Alerts.Systemd.Services))
+	for i, s := range cfg.Alerts.Systemd.Services {
+		systemd[i] = checkItem{name: s}
+	}
+	process := make([]checkItem, len(cfg.Alerts.Process.Names))
+	for i, p := range cfg.Alerts.Process.Names {
+		process[i] = checkItem{name: p}
+	}
+	http := make([]checkItem, len(cfg.Alerts.HTTP.Checks))
+	for i, c := range cfg.Alerts.HTTP.Checks {
+		http[i] = checkItem{name: c.Name, fallback: c.URL}
+	}
+	tcp := make([]checkItem, len(cfg.Alerts.TCP.Checks))
+	for i, c := range cfg.Alerts.TCP.Checks {
+		tcp[i] = checkItem{name: c.Name, fallback: c.Address}
+	}
+	return []checkFamily{
+		{prefix: "systemd", suffix: ".unhealthy", message: "Systemd service unhealthy: ", severity: cfg.Alerts.Systemd.Severity, items: systemd},
+		{prefix: "http", suffix: ".unhealthy", message: "HTTP check unhealthy: ", severity: cfg.Alerts.HTTP.Severity, items: http},
+		{prefix: "tcp", suffix: ".unhealthy", message: "TCP check unhealthy: ", severity: cfg.Alerts.TCP.Severity, items: tcp},
+		{prefix: "process", suffix: ".missing", message: "Process missing: ", severity: cfg.Alerts.Process.Severity, items: process},
+	}
 }
 
 // buildNotifiers maps configured notifier sections to live notifiers. A nil
@@ -373,10 +437,10 @@ func buildNotifiers(cfg NotifiersConfig) ([]Notifier, []string, error) {
 		active = append(active, "teams")
 	}
 	if n := cfg.Webhook; n != nil {
-		if err := validateWebhookURL("notifiers.webhook.url", n.URL); err != nil {
+		if err := validateWebhookURL("notifiers.webhook.webhook_url", n.WebhookURL); err != nil {
 			return nil, nil, err
 		}
-		notifiers = append(notifiers, &GenericWebhookNotifier{WebhookURL: n.URL})
+		notifiers = append(notifiers, &GenericWebhookNotifier{WebhookURL: n.WebhookURL})
 		active = append(active, "webhook")
 	}
 	if n := cfg.Telegram; n != nil {
