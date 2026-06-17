@@ -38,10 +38,15 @@ type State string
 const (
 	Running State = "running"
 	Exited  State = "stopped"
-	Paused  State = "paused"
-	Created State = "created"
 	Removed State = "removed"
 )
+
+// dieDebounce is how long a die evaluation waits before deciding a container
+// has truly failed, so a quick restart can cancel the pending failure.
+const dieDebounce = 1500 * time.Millisecond
+
+// healthUnhealthy is Docker's container health status for a failing healthcheck.
+const healthUnhealthy = "unhealthy"
 
 type ContainerState struct {
 	ID              string
@@ -50,11 +55,10 @@ type ContainerState struct {
 	State           State
 	LastOOMAt       time.Time
 	LastExit        int
-	LastStopAt      time.Time
 	LastDieAt       time.Time
 	PendingDie      bool
+	IntentionalStop bool
 	StartedAt       time.Time
-	DieTimes        []time.Time
 	StartTimes      []time.Time
 	IsAlerting      bool
 	RestartAlerting bool
@@ -75,13 +79,13 @@ type storedContainerState struct {
 	HealthAlerting  bool   `json:"health_alerting,omitempty"`
 }
 
-func dockerCollector(cli *client.Client, ctx context.Context, dockerEventsChannel chan<- DockerEvent) {
+func dockerCollector(ctx context.Context, cli *client.Client, events chan<- DockerEvent) {
 	f := make(client.Filters).Add("type", "container")
 	fmt.Println("Listening to Docker container events...")
 
 	var lastSeen time.Time
 	for ctx.Err() == nil {
-		latest, err := listenDockerEvents(cli, ctx, f, lastSeen, dockerEventsChannel)
+		latest, err := listenDockerEvents(ctx, cli, f, lastSeen, events)
 		if latest.After(lastSeen) {
 			lastSeen = latest
 		}
@@ -126,7 +130,7 @@ func dockerContainerSnapshots(ctx context.Context, cli *client.Client, container
 	return snapshots, nil
 }
 
-func listenDockerEvents(cli *client.Client, ctx context.Context, f client.Filters, since time.Time, dockerEventsChannel chan<- DockerEvent) (time.Time, error) {
+func listenDockerEvents(ctx context.Context, cli *client.Client, f client.Filters, since time.Time, out chan<- DockerEvent) (time.Time, error) {
 	options := client.EventsListOptions{Filters: f}
 	if !since.IsZero() {
 		options.Since = dockerEventSince(since)
@@ -163,7 +167,7 @@ func listenDockerEvents(cli *client.Client, ctx context.Context, f client.Filter
 
 			switch event.Action {
 			case events.ActionDie, events.ActionDestroy, events.ActionHealthStatusHealthy, events.ActionHealthStatusUnhealthy, events.ActionOOM, events.ActionRemove, events.ActionRestart, events.ActionStart, events.ActionStop:
-				dockerEventsChannel <- DockerEvent{
+				out <- DockerEvent{
 					ID:         event.Actor.ID,
 					Timestamp:  eventTime,
 					Action:     string(event.Action),
@@ -305,7 +309,7 @@ func reconcileDockerAlerts(containers map[string]*ContainerState, snapshots map[
 			container.RestartAlerting = false
 			alerts = append(alerts, *dockerRestartAlert(container, hostname, cfg.Severity, false, cfg.RestartThreshold))
 		}
-		if container.HealthAlerting && snapshot.Health != "unhealthy" {
+		if container.HealthAlerting && snapshot.Health != healthUnhealthy {
 			container.HealthAlerting = false
 			alerts = append(alerts, *dockerHealthAlert(container, hostname, cfg.Severity, false))
 		}
@@ -335,6 +339,7 @@ func handleDockerEvent(containers map[string]*ContainerState, dockerEvent Docker
 	case "start", "restart":
 		container.State = Running
 		container.StartedAt = dockerEvent.Timestamp
+		container.IntentionalStop = false
 		container.StartTimes = appendRecentTimes(container.StartTimes, dockerEvent.Timestamp, cfg.RestartWindow.Std())
 
 		if container.PendingDie && container.LastDieAt.Before(container.StartedAt) {
@@ -356,9 +361,6 @@ func handleDockerEvent(containers map[string]*ContainerState, dockerEvent Docker
 	case "destroy", "remove":
 		container.State = Removed
 		alerts := dockerRemovalAlerts(container, hostname, cfg.Severity, cfg.RestartThreshold)
-		if container.IsAlerting {
-			container.IsAlerting = false
-		}
 		delete(containers, dockerEvent.ID)
 		return alerts
 	case "die":
@@ -367,17 +369,17 @@ func handleDockerEvent(containers map[string]*ContainerState, dockerEvent Docker
 			container.LastExit = code
 		}
 		container.LastDieAt = dockerEvent.Timestamp
-		container.DieTimes = append(container.DieTimes, dockerEvent.Timestamp)
 		container.PendingDie = true
 
 		id := dockerEvent.ID
-		time.AfterFunc(1500*time.Millisecond, func() {
+		time.AfterFunc(dieDebounce, func() {
 			evalCh <- dockerEvaluation{ID: id, Kind: "die"}
 		})
-	case "stop":
-		container.LastStopAt = dockerEvent.Timestamp
 	case "oom":
 		container.LastOOMAt = dockerEvent.Timestamp
+	case "stop":
+		// An operator stopped the container; the die that follows is expected.
+		container.IntentionalStop = true
 	case string(events.ActionHealthStatusUnhealthy):
 		if !container.HealthAlerting {
 			container.HealthAlerting = true
@@ -396,10 +398,15 @@ func evaluateContainer(c *ContainerState, hostname string, cfg DockerConfig) *Al
 	defer func() {
 		c.PendingDie = false
 		c.LastOOMAt = time.Time{}
-		c.LastStopAt = time.Time{}
+		c.IntentionalStop = false
 	}()
 
 	if !c.PendingDie {
+		return nil
+	}
+	// A "stop" event means an operator stopped the container, so a non-zero exit
+	// (e.g. 143 from SIGTERM) is expected shutdown, not a failure.
+	if c.IntentionalStop {
 		return nil
 	}
 	if c.LastExit == 0 && c.LastOOMAt.IsZero() {
@@ -418,7 +425,9 @@ func evaluateContainer(c *ContainerState, hostname string, cfg DockerConfig) *Al
 }
 
 func evaluateDockerRestartLoop(c *ContainerState, hostname string, cfg DockerConfig, now time.Time) *Alert {
-	c.StartTimes = appendRecentTimes(c.StartTimes, now, cfg.RestartWindow.Std())
+	// Re-check the window without recording a start: if recent restarts have
+	// aged out and dropped below the threshold, the loop has subsided.
+	c.StartTimes = recentTimes(c.StartTimes, now, cfg.RestartWindow.Std())
 	if !c.RestartAlerting || len(c.StartTimes) >= cfg.RestartThreshold {
 		return nil
 	}
@@ -492,21 +501,27 @@ func dockerHealthAlert(c *ContainerState, hostname string, severity Severity, fi
 	}
 }
 
+// recentTimes drops entries older than window before now. window <= 0 keeps all.
+func recentTimes(times []time.Time, now time.Time, window time.Duration) []time.Time {
+	if window <= 0 {
+		return times
+	}
+	cutoff := now.Add(-window)
+	kept := times[:0]
+	for _, existing := range times {
+		if !existing.Before(cutoff) {
+			kept = append(kept, existing)
+		}
+	}
+	return kept
+}
+
+// appendRecentTimes records t and drops entries older than window before t.
 func appendRecentTimes(times []time.Time, t time.Time, window time.Duration) []time.Time {
 	if t.IsZero() {
 		t = time.Now()
 	}
-	if window <= 0 {
-		return append(times, t)
-	}
-	cutoff := t.Add(-window)
-	kept := times[:0]
-	for _, existing := range times {
-		if existing.After(cutoff) || existing.Equal(cutoff) {
-			kept = append(kept, existing)
-		}
-	}
-	return append(kept, t)
+	return append(recentTimes(times, t, window), t)
 }
 
 func dockerMetricName(c *ContainerState) string {

@@ -100,6 +100,47 @@ func TestDockerOOMBuildsAlert(t *testing.T) {
 	}
 }
 
+// A graceful `docker stop` makes the container exit non-zero (e.g. 143 from
+// SIGTERM) and emits a "stop" event after the "die". That is expected shutdown,
+// not a failure, so it must not alert.
+func TestDockerIntentionalStopDoesNotAlert(t *testing.T) {
+	containers := map[string]*ContainerState{}
+	cfg := testDockerConfig()
+
+	handleDockerEvent(containers, dockerDieEvent("abcdef123456", "api", "143"), dockerEvalChannel(), "host-a", cfg)
+	handleDockerEvent(containers, DockerEvent{
+		ID:         "abcdef123456",
+		Timestamp:  time.Unix(101, 0),
+		Action:     "stop",
+		Attributes: map[string]string{"name": "api"},
+	}, dockerEvalChannel(), "host-a", cfg)
+
+	if alert := evaluateContainer(containers["abcdef123456"], "host-a", cfg); alert != nil {
+		t.Fatalf("intentional stop should not alert, got %+v", alert)
+	}
+}
+
+// After an intentional stop is suppressed, the container starting and then
+// crashing for real must still alert (the stop flag must not linger).
+func TestDockerCrashAfterStopAndRestartStillAlerts(t *testing.T) {
+	containers := map[string]*ContainerState{}
+	cfg := testDockerConfig()
+
+	handleDockerEvent(containers, dockerDieEvent("abcdef123456", "api", "143"), dockerEvalChannel(), "host-a", cfg)
+	handleDockerEvent(containers, DockerEvent{ID: "abcdef123456", Timestamp: time.Unix(101, 0), Action: "stop", Attributes: map[string]string{"name": "api"}}, dockerEvalChannel(), "host-a", cfg)
+	if alert := evaluateContainer(containers["abcdef123456"], "host-a", cfg); alert != nil {
+		t.Fatalf("intentional stop should not alert, got %+v", alert)
+	}
+
+	handleDockerEvent(containers, DockerEvent{ID: "abcdef123456", Timestamp: time.Unix(110, 0), Action: "start", Attributes: map[string]string{"name": "api"}}, dockerEvalChannel(), "host-a", cfg)
+	handleDockerEvent(containers, DockerEvent{ID: "abcdef123456", Timestamp: time.Unix(120, 0), Action: "die", Attributes: map[string]string{"name": "api", "exitCode": "1"}}, dockerEvalChannel(), "host-a", cfg)
+
+	alert := evaluateContainer(containers["abcdef123456"], "host-a", cfg)
+	if alert == nil || !alert.IsFiring {
+		t.Fatalf("a real crash after restart should alert, got %+v", alert)
+	}
+}
+
 func TestDockerStartResolvesActiveAlert(t *testing.T) {
 	containers := map[string]*ContainerState{
 		"abcdef123456": {
@@ -328,6 +369,29 @@ func TestDockerRestartLoopBuildsAndResolvesAlert(t *testing.T) {
 	resolved := evaluateDockerRestartLoop(containers["abcdef123456"], "host-a", cfg, time.Unix(200, 0))
 	if resolved == nil || resolved.IsFiring {
 		t.Fatalf("expected restart loop resolve, got %+v", resolved)
+	}
+}
+
+// Evaluating a still-active restart loop must not record a phantom start: the
+// evaluation only re-checks the window, it is not itself a restart.
+func TestDockerRestartLoopEvaluationDoesNotRecordPhantomStart(t *testing.T) {
+	cfg := testDockerConfig()
+	cfg.RestartThreshold = 3
+	cfg.RestartWindow = Duration(time.Minute)
+	c := &ContainerState{
+		ID:              "abcdef123456",
+		Name:            "api",
+		RestartAlerting: true,
+		StartTimes:      []time.Time{time.Unix(100, 0), time.Unix(101, 0), time.Unix(103, 0)},
+	}
+
+	// now=120 is still within the window of all three starts, so the loop has
+	// not subsided: no resolve, and the count stays at the three real restarts.
+	if alert := evaluateDockerRestartLoop(c, "host-a", cfg, time.Unix(120, 0)); alert != nil {
+		t.Fatalf("expected no resolve while still looping, got %+v", alert)
+	}
+	if len(c.StartTimes) != 3 {
+		t.Fatalf("evaluation recorded a phantom start: StartTimes = %d, want 3", len(c.StartTimes))
 	}
 }
 
