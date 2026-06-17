@@ -1,7 +1,0 @@
-Filesystem      Size  Used Avail Use% Mounted on
-/dev/nvme0n1p2  476G  145G  307G  32% /
-/dev/nvme0n1p1  511M  6.2M  505M   2% /boot/efi
-/dev/sda1       1.8T  892G  860G  51% /home
-tmpfs           3.0G     0  3.0G   0% /run
-tmpfs            16G  128K   16G   1% /dev/shm
-/dev/sdb1       3.6T  2.1T  1.4T  61% /data
