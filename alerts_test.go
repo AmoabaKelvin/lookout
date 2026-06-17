@@ -32,8 +32,8 @@ func newTestManager(rules []Rule, renotify time.Duration) (*AlertManager, *captu
 
 func newStaleTestManager(staleAfter time.Duration) (*AlertManager, *captureNotifier, *time.Time) {
 	am, cap, clock := newTestManager([]Rule{memRule(2 * time.Minute)}, 10*time.Minute)
-	am.StaleAfter = staleAfter
-	am.Tracked = []TrackedMetric{{RuleID: "memory", Name: "memory.used_percent"}}
+	am.staleAfter = staleAfter
+	am.tracked = []TrackedMetric{{RuleID: "memory", Name: "memory.used_percent"}}
 	return am, cap, clock
 }
 
@@ -302,15 +302,15 @@ func TestAlertStatePersistsFiringAcrossRestart(t *testing.T) {
 	stateFile := filepath.Join(t.TempDir(), "state.json")
 
 	am, cap, _ := newTestManager([]Rule{memRule(0)}, time.Hour)
-	am.StateFile = stateFile
+	am.stateFile = stateFile
 	am.Evaluate(memSample(90))
 	if len(cap.alerts) != 1 || !cap.alerts[0].IsFiring {
 		t.Fatalf("expected initial firing alert, got %+v", cap.alerts)
 	}
 
 	restarted, restartedCap, _ := newTestManager([]Rule{memRule(0)}, time.Hour)
-	restarted.StateFile = stateFile
-	if err := restarted.LoadState(stateFile); err != nil {
+	restarted.stateFile = stateFile
+	if err := restarted.LoadState(); err != nil {
 		t.Fatal(err)
 	}
 
@@ -327,7 +327,8 @@ func TestAlertStatePersistsFiringAcrossRestart(t *testing.T) {
 
 func TestLoadStateMissingFileIsOK(t *testing.T) {
 	am, _, _ := newTestManager([]Rule{memRule(0)}, time.Hour)
-	if err := am.LoadState(filepath.Join(t.TempDir(), "missing.json")); err != nil {
+	am.stateFile = filepath.Join(t.TempDir(), "missing.json")
+	if err := am.LoadState(); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -335,7 +336,7 @@ func TestLoadStateMissingFileIsOK(t *testing.T) {
 func TestSaveStateCreatesPrivateFile(t *testing.T) {
 	stateFile := filepath.Join(t.TempDir(), "nested", "state.json")
 	am, _, _ := newTestManager([]Rule{memRule(0)}, time.Hour)
-	am.StateFile = stateFile
+	am.stateFile = stateFile
 
 	am.Evaluate(memSample(90))
 

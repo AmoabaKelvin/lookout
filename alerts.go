@@ -56,24 +56,24 @@ type alertState struct {
 }
 
 type AlertManager struct {
-	Rules         []Rule
-	StateManager  map[string]*alertState
-	StateFile     string
-	RenotifyAfter time.Duration
-	StaleAfter    time.Duration
-	Tracked       []TrackedMetric
-	Hostname      string
-	Notifiers     []Notifier
+	rules         []Rule
+	states        map[string]*alertState
+	stateFile     string
+	renotifyAfter time.Duration
+	staleAfter    time.Duration
+	tracked       []TrackedMetric
+	hostname      string
+	notifiers     []Notifier
 	now           func() time.Time // injectable for tests
 }
 
 func NewAlertManager(rules []Rule, renotifyAfter time.Duration, hostname string, notifiers []Notifier) *AlertManager {
 	return &AlertManager{
-		Rules:         rules,
-		StateManager:  make(map[string]*alertState),
-		RenotifyAfter: renotifyAfter,
-		Hostname:      hostname,
-		Notifiers:     notifiers,
+		rules:         rules,
+		states:        make(map[string]*alertState),
+		renotifyAfter: renotifyAfter,
+		hostname:      hostname,
+		notifiers:     notifiers,
 		now:           time.Now,
 	}
 }
@@ -94,12 +94,12 @@ func stateKey(ruleID, metricName string) string {
 	return ruleID + "|" + metricName
 }
 
-func (am *AlertManager) LoadState(path string) error {
-	if path == "" {
+func (am *AlertManager) LoadState() error {
+	if am.stateFile == "" {
 		return nil
 	}
 
-	data, err := os.ReadFile(path)
+	data, err := os.ReadFile(am.stateFile)
 	if errors.Is(err, os.ErrNotExist) {
 		return nil
 	}
@@ -116,7 +116,7 @@ func (am *AlertManager) LoadState(path string) error {
 		if s.RuleID == "" || s.MetricName == "" {
 			continue
 		}
-		am.StateManager[stateKey(s.RuleID, s.MetricName)] = &alertState{
+		am.states[stateKey(s.RuleID, s.MetricName)] = &alertState{
 			ruleID:            s.RuleID,
 			metricName:        s.MetricName,
 			isFiring:          s.IsFiring,
@@ -132,17 +132,17 @@ func (am *AlertManager) LoadState(path string) error {
 }
 
 func (am *AlertManager) saveState() {
-	if am.StateFile == "" {
+	if am.stateFile == "" {
 		return
 	}
-	if err := am.writeState(am.StateFile); err != nil {
+	if err := am.writeState(am.stateFile); err != nil {
 		log.Printf("error saving alert state: %v", err)
 	}
 }
 
 func (am *AlertManager) writeState(path string) error {
-	stored := make([]storedAlertState, 0, len(am.StateManager))
-	for _, s := range am.StateManager {
+	stored := make([]storedAlertState, 0, len(am.states))
+	for _, s := range am.states {
 		stored = append(stored, storedAlertState{
 			RuleID:            s.ruleID,
 			MetricName:        s.metricName,
@@ -190,7 +190,7 @@ func (am *AlertManager) writeState(path string) error {
 }
 
 func (am *AlertManager) dispatch(alert Alert) {
-	for _, n := range am.Notifiers {
+	for _, n := range am.notifiers {
 		if err := n.Send(alert); err != nil {
 			log.Printf("error sending alert: %v", err)
 		}
@@ -203,7 +203,7 @@ func (am *AlertManager) buildAlert(rule Rule, sample MetricSample, firing bool) 
 		Title:     rule.Message,
 		Value:     sample.Value,
 		Threshold: rule.Threshold,
-		Hostname:  am.Hostname,
+		Hostname:  am.hostname,
 		Metric:    sample.Name,
 		Unit:      sample.Unit,
 		Severity:  rule.Severity,
@@ -219,8 +219,8 @@ func (am *AlertManager) buildStaleAlert(metricName string, firing bool, age time
 		IsFiring:  firing,
 		Title:     title,
 		Value:     age.Seconds(),
-		Threshold: am.StaleAfter.Seconds(),
-		Hostname:  am.Hostname,
+		Threshold: am.staleAfter.Seconds(),
+		Hostname:  am.hostname,
 		Metric:    metricName,
 		Unit:      "seconds",
 		Severity:  SeverityWarning,
@@ -239,16 +239,16 @@ func (s *alertState) missingFor(now time.Time) time.Duration {
 
 func (am *AlertManager) stateFor(rule Rule, metricName string) *alertState {
 	key := stateKey(rule.ID, metricName)
-	state := am.StateManager[key]
+	state := am.states[key]
 	if state == nil {
 		state = &alertState{ruleID: rule.ID, metricName: metricName}
-		am.StateManager[key] = state
+		am.states[key] = state
 	}
 	return state
 }
 
 func (am *AlertManager) ruleByID(id string) (Rule, bool) {
-	for _, rule := range am.Rules {
+	for _, rule := range am.rules {
 		if rule.ID == id {
 			return rule, true
 		}
@@ -259,7 +259,7 @@ func (am *AlertManager) ruleByID(id string) (Rule, bool) {
 func (am *AlertManager) Evaluate(sample MetricSample) {
 	now := am.now()
 
-	for _, rule := range am.Rules {
+	for _, rule := range am.rules {
 		if !rule.Matcher(sample) {
 			continue
 		}
@@ -295,7 +295,7 @@ func (am *AlertManager) Evaluate(sample MetricSample) {
 			}
 
 			// still above the firing threshold: nudge again only after RenotifyAfter
-			if now.Sub(state.lastNotified) >= am.RenotifyAfter {
+			if now.Sub(state.lastNotified) >= am.renotifyAfter {
 				am.dispatch(am.buildAlert(rule, sample, true))
 				state.lastNotified = now
 				am.saveState()
@@ -328,18 +328,18 @@ func (am *AlertManager) Evaluate(sample MetricSample) {
 }
 
 func (am *AlertManager) CheckStale() {
-	if am.StaleAfter <= 0 {
+	if am.staleAfter <= 0 {
 		return
 	}
 
 	now := am.now()
-	for _, tracked := range am.Tracked {
+	for _, tracked := range am.tracked {
 		if rule, ok := am.ruleByID(tracked.RuleID); ok {
 			am.stateFor(rule, tracked.Name)
 		}
 	}
 
-	for _, state := range am.StateManager {
+	for _, state := range am.states {
 		missingFor := state.missingFor(now)
 		if state.lastSeen.IsZero() {
 			if state.missingSince.IsZero() {
@@ -349,13 +349,13 @@ func (am *AlertManager) CheckStale() {
 			}
 		}
 
-		if missingFor < am.StaleAfter {
+		if missingFor < am.staleAfter {
 			continue
 		}
 
 		state.pendingSince = time.Time{}
 		if state.isStale {
-			if now.Sub(state.staleLastNotified) >= am.RenotifyAfter {
+			if now.Sub(state.staleLastNotified) >= am.renotifyAfter {
 				am.dispatch(am.buildStaleAlert(state.metricName, true, missingFor))
 				state.staleLastNotified = now
 				am.saveState()
