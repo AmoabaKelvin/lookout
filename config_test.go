@@ -28,13 +28,13 @@ func TestLoadConfigDefaults(t *testing.T) {
 	if cfg.StateFile != defaultStateFile {
 		t.Errorf("state file: got %s", cfg.StateFile)
 	}
-	if cfg.Alerts.Memory.Threshold != 80 {
+	if cfg.Alerts.Memory.Threshold != 85 {
 		t.Errorf("memory threshold: got %v", cfg.Alerts.Memory.Threshold)
 	}
 	if cfg.Alerts.StaleAfter.Std() != 90*time.Second {
 		t.Errorf("stale after: got %s", cfg.Alerts.StaleAfter.Std())
 	}
-	if cfg.Alerts.Memory.ResolveBelow == nil || *cfg.Alerts.Memory.ResolveBelow != 75 {
+	if cfg.Alerts.Memory.ResolveBelow == nil || *cfg.Alerts.Memory.ResolveBelow != 80 {
 		t.Errorf("memory resolve below: got %v", cfg.Alerts.Memory.ResolveBelow)
 	}
 	if cfg.Alerts.Disk.ResolveBelow == nil || *cfg.Alerts.Disk.ResolveBelow != 80 {
@@ -55,11 +55,23 @@ func TestLoadConfigDefaults(t *testing.T) {
 	if cfg.Alerts.CPU.ResolveBelow == nil || *cfg.Alerts.CPU.ResolveBelow != 80 {
 		t.Errorf("cpu resolve below: got %v", cfg.Alerts.CPU.ResolveBelow)
 	}
+	if cfg.Alerts.Swap.Threshold != 80 {
+		t.Errorf("swap threshold: got %v", cfg.Alerts.Swap.Threshold)
+	}
+	if cfg.Alerts.Swap.ResolveBelow == nil || *cfg.Alerts.Swap.ResolveBelow != 75 {
+		t.Errorf("swap resolve below: got %v", cfg.Alerts.Swap.ResolveBelow)
+	}
 	if cfg.Alerts.Systemd.Severity != SeverityCritical {
 		t.Errorf("systemd severity: got %s", cfg.Alerts.Systemd.Severity)
 	}
 	if cfg.Alerts.HTTP.Severity != SeverityCritical {
 		t.Errorf("http severity: got %s", cfg.Alerts.HTTP.Severity)
+	}
+	if cfg.Alerts.TCP.Severity != SeverityCritical {
+		t.Errorf("tcp severity: got %s", cfg.Alerts.TCP.Severity)
+	}
+	if cfg.Alerts.Process.Severity != SeverityCritical {
+		t.Errorf("process defaults: %+v", cfg.Alerts.Process)
 	}
 	if cfg.Docker.Severity != SeverityCritical {
 		t.Errorf("docker severity: got %s", cfg.Docker.Severity)
@@ -99,6 +111,11 @@ alerts:
     resolve_below: 65
     for: 45s
     severity: critical
+  swap:
+    threshold: 60
+    resolve_below: 50
+    for: 1m
+    severity: critical
   systemd:
     services:
       - nginx
@@ -110,6 +127,16 @@ alerts:
         url: "https://example.com/health"
         timeout: 3s
         expected_status: 204
+  tcp:
+    severity: warning
+    checks:
+      - name: redis
+        address: "127.0.0.1:6379"
+        timeout: 2s
+  process:
+    severity: warning
+    names:
+      - nginx
 notifiers:
   slack:
     webhook_url: "https://hooks.slack.com/services/X/Y/Z"
@@ -174,11 +201,26 @@ docker:
 	if cfg.Alerts.CPU.Severity != SeverityCritical {
 		t.Errorf("cpu severity override: got %s", cfg.Alerts.CPU.Severity)
 	}
+	if cfg.Alerts.Swap.Threshold != 60 || cfg.Alerts.Swap.For.Std() != time.Minute {
+		t.Errorf("swap overrides not applied: %+v", cfg.Alerts.Swap)
+	}
+	if cfg.Alerts.Swap.ResolveBelow == nil || *cfg.Alerts.Swap.ResolveBelow != 50 {
+		t.Errorf("swap resolve below override: got %v", cfg.Alerts.Swap.ResolveBelow)
+	}
+	if cfg.Alerts.Swap.Severity != SeverityCritical {
+		t.Errorf("swap severity override: got %s", cfg.Alerts.Swap.Severity)
+	}
 	if len(cfg.Alerts.Systemd.Services) != 1 || cfg.Alerts.Systemd.Services[0] != "nginx" || cfg.Alerts.Systemd.Severity != SeverityWarning {
 		t.Errorf("systemd overrides not applied: %+v", cfg.Alerts.Systemd)
 	}
 	if len(cfg.Alerts.HTTP.Checks) != 1 || cfg.Alerts.HTTP.Checks[0].Name != "app" || cfg.Alerts.HTTP.Checks[0].ExpectedStatus != 204 || cfg.Alerts.HTTP.Checks[0].Timeout.Std() != 3*time.Second {
 		t.Errorf("http overrides not applied: %+v", cfg.Alerts.HTTP)
+	}
+	if len(cfg.Alerts.TCP.Checks) != 1 || cfg.Alerts.TCP.Checks[0].Name != "redis" || cfg.Alerts.TCP.Checks[0].Address != "127.0.0.1:6379" || cfg.Alerts.TCP.Checks[0].Timeout.Std() != 2*time.Second || cfg.Alerts.TCP.Severity != SeverityWarning {
+		t.Errorf("tcp overrides not applied: %+v", cfg.Alerts.TCP)
+	}
+	if len(cfg.Alerts.Process.Names) != 1 || cfg.Alerts.Process.Names[0] != "nginx" || cfg.Alerts.Process.Severity != SeverityWarning {
+		t.Errorf("process overrides not applied: %+v", cfg.Alerts.Process)
 	}
 	if cfg.Notifiers.Slack == nil || cfg.Notifiers.Slack.WebhookURL == "" {
 		t.Errorf("slack notifier not parsed")
@@ -251,6 +293,9 @@ alerts:
   cpu:
     threshold: -1
     severity: bogus
+  swap:
+    threshold: 250
+    severity: bogus
   systemd:
     severity: bogus
   http:
@@ -258,6 +303,13 @@ alerts:
     checks:
       - name: app
         url: "https://example.com"
+  tcp:
+    severity: bogus
+    checks:
+      - name: redis
+        address: "127.0.0.1:6379"
+  process:
+    severity: bogus
 docker:
   severity: bogus
   restart_threshold: 0
@@ -287,6 +339,12 @@ docker:
 	if cfg.Alerts.CPU.Severity != SeverityWarning {
 		t.Errorf("invalid cpu severity should fall back, got %s", cfg.Alerts.CPU.Severity)
 	}
+	if cfg.Alerts.Swap.Threshold != 100 {
+		t.Errorf("swap threshold >100 should clamp to 100, got %v", cfg.Alerts.Swap.Threshold)
+	}
+	if cfg.Alerts.Swap.Severity != SeverityWarning {
+		t.Errorf("invalid swap severity should fall back, got %s", cfg.Alerts.Swap.Severity)
+	}
 	if cfg.Alerts.Systemd.Severity != SeverityCritical {
 		t.Errorf("invalid systemd severity should fall back, got %s", cfg.Alerts.Systemd.Severity)
 	}
@@ -295,6 +353,15 @@ docker:
 	}
 	if cfg.Alerts.HTTP.Checks[0].Timeout.Std() != 5*time.Second || cfg.Alerts.HTTP.Checks[0].ExpectedStatus != 200 {
 		t.Errorf("http check defaults not applied: %+v", cfg.Alerts.HTTP.Checks[0])
+	}
+	if cfg.Alerts.TCP.Severity != SeverityCritical {
+		t.Errorf("invalid tcp severity should fall back, got %s", cfg.Alerts.TCP.Severity)
+	}
+	if cfg.Alerts.TCP.Checks[0].Timeout.Std() != 5*time.Second {
+		t.Errorf("tcp check defaults not applied: %+v", cfg.Alerts.TCP.Checks[0])
+	}
+	if cfg.Alerts.Process.Severity != SeverityCritical {
+		t.Errorf("invalid process config should fall back, got %+v", cfg.Alerts.Process)
 	}
 	if cfg.Docker.Severity != SeverityCritical {
 		t.Errorf("invalid docker severity should fall back, got %s", cfg.Docker.Severity)
@@ -316,6 +383,8 @@ alerts:
     threshold: 8
   cpu:
     threshold: 70
+  swap:
+    threshold: 40
 `))
 	if err != nil {
 		t.Fatal(err)
@@ -331,6 +400,24 @@ alerts:
 	}
 	if cfg.Alerts.CPU.ResolveBelow == nil || *cfg.Alerts.CPU.ResolveBelow != 65 {
 		t.Errorf("missing cpu resolve_below should default to threshold-5, got %v", cfg.Alerts.CPU.ResolveBelow)
+	}
+	if cfg.Alerts.Swap.ResolveBelow == nil || *cfg.Alerts.Swap.ResolveBelow != 35 {
+		t.Errorf("missing swap resolve_below should default to threshold-5, got %v", cfg.Alerts.Swap.ResolveBelow)
+	}
+}
+
+// TestExampleConfigParses guards against drift between the shipped example
+// config and the schema/defaults (e.g. a renamed key or a dropped field).
+func TestExampleConfigParses(t *testing.T) {
+	cfg, err := LoadConfig("deploy/config.example.yaml")
+	if err != nil {
+		t.Fatalf("example config should parse: %v", err)
+	}
+	if cfg.Alerts.Memory.Severity != SeverityWarning {
+		t.Errorf("example memory severity: got %s", cfg.Alerts.Memory.Severity)
+	}
+	if len(cfg.Alerts.Disk.Mounts) != 1 || cfg.Alerts.Disk.Mounts[0] != "/" {
+		t.Errorf("example disk mounts: got %v", cfg.Alerts.Disk.Mounts)
 	}
 }
 

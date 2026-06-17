@@ -137,7 +137,7 @@ func TestBuildNotifiersValidatesAndReturnsActiveNames(t *testing.T) {
 	notifiers, active, err := buildNotifiers(NotifiersConfig{
 		Slack:    &WebhookConfig{WebhookURL: "https://hooks.slack.com/services/X/Y/Z"},
 		Teams:    &WebhookConfig{WebhookURL: "https://example.webhook.office.com/team"},
-		Webhook:  &GenericConfig{URL: "https://example.com/lookout"},
+		Webhook:  &WebhookConfig{WebhookURL: "https://example.com/lookout"},
 		Telegram: &TelegramConfig{BotToken: "token", ChatID: "chat"},
 		PagerDuty: &PagerDutyConfig{
 			IntegrationKey: "pagerduty-key",

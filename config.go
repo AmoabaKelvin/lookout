@@ -49,8 +49,11 @@ type AlertsConfig struct {
 	Disk          DiskConfig      `yaml:"disk"`
 	Load          LoadAlertConfig `yaml:"load"`
 	CPU           CPUConfig       `yaml:"cpu"`
+	Swap          SwapConfig      `yaml:"swap"`
 	Systemd       SystemdConfig   `yaml:"systemd"`
 	HTTP          HTTPConfig      `yaml:"http"`
+	TCP           TCPConfig       `yaml:"tcp"`
+	Process       ProcessConfig   `yaml:"process"`
 }
 
 type MemoryConfig struct {
@@ -58,7 +61,6 @@ type MemoryConfig struct {
 	ResolveBelow *float64 `yaml:"resolve_below"`
 	For          Duration `yaml:"for"`
 	Severity     Severity `yaml:"severity"`
-	Source       string   `yaml:"source"`
 }
 
 type DiskConfig struct {
@@ -66,7 +68,6 @@ type DiskConfig struct {
 	ResolveBelow *float64 `yaml:"resolve_below"`
 	For          Duration `yaml:"for"`
 	Severity     Severity `yaml:"severity"`
-	Source       string   `yaml:"source"`
 	Mounts       []string `yaml:"mounts"`
 }
 
@@ -75,7 +76,6 @@ type LoadAlertConfig struct {
 	ResolveBelow *float64 `yaml:"resolve_below"`
 	For          Duration `yaml:"for"`
 	Severity     Severity `yaml:"severity"`
-	Source       string   `yaml:"source"`
 }
 
 type CPUConfig struct {
@@ -83,7 +83,13 @@ type CPUConfig struct {
 	ResolveBelow *float64 `yaml:"resolve_below"`
 	For          Duration `yaml:"for"`
 	Severity     Severity `yaml:"severity"`
-	Source       string   `yaml:"source"`
+}
+
+type SwapConfig struct {
+	Threshold    float64  `yaml:"threshold"`
+	ResolveBelow *float64 `yaml:"resolve_below"`
+	For          Duration `yaml:"for"`
+	Severity     Severity `yaml:"severity"`
 }
 
 type SystemdConfig struct {
@@ -103,6 +109,22 @@ type HTTPCheckConfig struct {
 	ExpectedStatus int      `yaml:"expected_status"`
 }
 
+type TCPConfig struct {
+	Checks   []TCPCheckConfig `yaml:"checks"`
+	Severity Severity         `yaml:"severity"`
+}
+
+type TCPCheckConfig struct {
+	Name    string   `yaml:"name"`
+	Address string   `yaml:"address"`
+	Timeout Duration `yaml:"timeout"`
+}
+
+type ProcessConfig struct {
+	Names    []string `yaml:"names"`
+	Severity Severity `yaml:"severity"`
+}
+
 // Notifier sections are pointers so an absent section is nil (not configured)
 // and a present one is enabled.
 type NotifiersConfig struct {
@@ -112,7 +134,7 @@ type NotifiersConfig struct {
 	Teams      *WebhookConfig   `yaml:"teams"`
 	Telegram   *TelegramConfig  `yaml:"telegram"`
 	PagerDuty  *PagerDutyConfig `yaml:"pagerduty"`
-	Webhook    *GenericConfig   `yaml:"webhook"`
+	Webhook    *WebhookConfig   `yaml:"webhook"`
 	Email      *EmailConfig     `yaml:"email"`
 }
 
@@ -127,10 +149,6 @@ type TelegramConfig struct {
 
 type PagerDutyConfig struct {
 	IntegrationKey string `yaml:"integration_key"`
-}
-
-type GenericConfig struct {
-	URL string `yaml:"url"`
 }
 
 type EmailConfig struct {
@@ -162,32 +180,35 @@ func defaultConfig() Config {
 		Alerts: AlertsConfig{
 			RenotifyAfter: Duration(time.Hour),
 			Memory: MemoryConfig{
-				Threshold: 80,
+				Threshold: 85,
 				For:       Duration(2 * time.Minute),
-				Severity:  SeverityCritical,
-				Source:    "/proc/meminfo",
+				Severity:  SeverityWarning,
 			},
 			Disk: DiskConfig{
 				Threshold: 85,
 				For:       Duration(2 * time.Minute),
 				Severity:  SeverityWarning,
-				Source:    "/proc/mounts",
-				Mounts:    []string{"/", "/home", "/var", "/boot"},
+				Mounts:    []string{"/"},
 			},
 			Load: LoadAlertConfig{
 				Threshold: 4,
 				For:       Duration(2 * time.Minute),
 				Severity:  SeverityWarning,
-				Source:    "/proc/loadavg",
 			},
 			CPU: CPUConfig{
 				Threshold: 85,
 				For:       Duration(2 * time.Minute),
 				Severity:  SeverityWarning,
-				Source:    "/proc/stat",
+			},
+			Swap: SwapConfig{
+				Threshold: 80,
+				For:       Duration(2 * time.Minute),
+				Severity:  SeverityWarning,
 			},
 			Systemd: SystemdConfig{Severity: SeverityCritical},
 			HTTP:    HTTPConfig{Severity: SeverityCritical},
+			TCP:     TCPConfig{Severity: SeverityCritical},
+			Process: ProcessConfig{Severity: SeverityCritical},
 		},
 		Heartbeat: HeartbeatConfig{Interval: Duration(60 * time.Second)},
 		Docker: DockerConfig{
@@ -226,31 +247,43 @@ func LoadConfig(path string) (Config, error) {
 // misconfigured file degrades gracefully instead of crashing or going silent.
 func (c *Config) validate() {
 	clampInterval(&c.CollectionInterval, 30*time.Second, "collection_interval")
+	if floor := 5 * time.Second; c.CollectionInterval.Std() < floor {
+		log.Printf("config: collection_interval below %s is too aggressive; using %s", floor, floor)
+		c.CollectionInterval = Duration(floor)
+	}
 	defaultString(&c.StateFile, defaultStateFile)
 	clampInterval(&c.Heartbeat.Interval, 60*time.Second, "heartbeat.interval")
 	clampInterval(&c.Alerts.RenotifyAfter, time.Hour, "alerts.renotify_after")
-	defaultStaleAfter(&c.Alerts.StaleAfter, 3*c.CollectionInterval.Std())
+	if c.Alerts.StaleAfter.Std() <= 0 {
+		c.Alerts.StaleAfter = Duration(3 * c.CollectionInterval.Std())
+	}
 
 	clampThreshold(&c.Alerts.Memory.Threshold, "alerts.memory.threshold")
 	clampThreshold(&c.Alerts.Disk.Threshold, "alerts.disk.threshold")
 	clampThreshold(&c.Alerts.CPU.Threshold, "alerts.cpu.threshold")
+	clampThreshold(&c.Alerts.Swap.Threshold, "alerts.swap.threshold")
 	clampPositiveFloat(&c.Alerts.Load.Threshold, 4, "alerts.load.threshold")
 	c.Alerts.Memory.ResolveBelow = normalizedResolveBelow(c.Alerts.Memory.ResolveBelow, c.Alerts.Memory.Threshold, 5, "alerts.memory.resolve_below")
 	c.Alerts.Disk.ResolveBelow = normalizedResolveBelow(c.Alerts.Disk.ResolveBelow, c.Alerts.Disk.Threshold, 5, "alerts.disk.resolve_below")
 	c.Alerts.CPU.ResolveBelow = normalizedResolveBelow(c.Alerts.CPU.ResolveBelow, c.Alerts.CPU.Threshold, 5, "alerts.cpu.resolve_below")
+	c.Alerts.Swap.ResolveBelow = normalizedResolveBelow(c.Alerts.Swap.ResolveBelow, c.Alerts.Swap.Threshold, 5, "alerts.swap.resolve_below")
 	c.Alerts.Load.ResolveBelow = normalizedResolveBelow(c.Alerts.Load.ResolveBelow, c.Alerts.Load.Threshold, 1, "alerts.load.resolve_below")
 
 	clampFor(&c.Alerts.Memory.For, "alerts.memory.for")
 	clampFor(&c.Alerts.Disk.For, "alerts.disk.for")
 	clampFor(&c.Alerts.Load.For, "alerts.load.for")
 	clampFor(&c.Alerts.CPU.For, "alerts.cpu.for")
+	clampFor(&c.Alerts.Swap.For, "alerts.swap.for")
 
-	clampSeverity(&c.Alerts.Memory.Severity, SeverityCritical, "alerts.memory.severity")
+	clampSeverity(&c.Alerts.Memory.Severity, SeverityWarning, "alerts.memory.severity")
 	clampSeverity(&c.Alerts.Disk.Severity, SeverityWarning, "alerts.disk.severity")
 	clampSeverity(&c.Alerts.Load.Severity, SeverityWarning, "alerts.load.severity")
 	clampSeverity(&c.Alerts.CPU.Severity, SeverityWarning, "alerts.cpu.severity")
+	clampSeverity(&c.Alerts.Swap.Severity, SeverityWarning, "alerts.swap.severity")
 	clampSeverity(&c.Alerts.Systemd.Severity, SeverityCritical, "alerts.systemd.severity")
 	clampSeverity(&c.Alerts.HTTP.Severity, SeverityCritical, "alerts.http.severity")
+	clampSeverity(&c.Alerts.TCP.Severity, SeverityCritical, "alerts.tcp.severity")
+	clampSeverity(&c.Alerts.Process.Severity, SeverityCritical, "alerts.process.severity")
 	clampSeverity(&c.Docker.Severity, SeverityCritical, "docker.severity")
 	clampPositiveInt(&c.Docker.RestartThreshold, 3, "docker.restart_threshold")
 	clampInterval(&c.Docker.RestartWindow, 10*time.Minute, "docker.restart_window")
@@ -261,6 +294,11 @@ func (c *Config) validate() {
 		}
 		if c.Alerts.HTTP.Checks[i].ExpectedStatus == 0 {
 			c.Alerts.HTTP.Checks[i].ExpectedStatus = 200
+		}
+	}
+	for i := range c.Alerts.TCP.Checks {
+		if c.Alerts.TCP.Checks[i].Timeout.Std() <= 0 {
+			c.Alerts.TCP.Checks[i].Timeout = Duration(5 * time.Second)
 		}
 	}
 }
@@ -278,12 +316,6 @@ func clampInterval(d *Duration, fallback time.Duration, name string) {
 	}
 }
 
-func defaultStaleAfter(d *Duration, fallback time.Duration) {
-	if d.Std() <= 0 {
-		*d = Duration(fallback)
-	}
-}
-
 func defaultResolveBelow(threshold float64, margin float64) float64 {
 	resolveBelow := threshold - margin
 	if resolveBelow < 0 {
@@ -293,15 +325,13 @@ func defaultResolveBelow(threshold float64, margin float64) float64 {
 }
 
 func clampThreshold(v *float64, name string) {
-	if *v < 0 || *v > 100 {
-		clamped := *v
-		if clamped < 0 {
-			clamped = 0
-		} else {
-			clamped = 100
-		}
-		log.Printf("config: %s must be between 0 and 100; using %.0f", name, clamped)
-		*v = clamped
+	switch {
+	case *v < 0:
+		log.Printf("config: %s must be between 0 and 100; using 0", name)
+		*v = 0
+	case *v > 100:
+		log.Printf("config: %s must be between 0 and 100; using 100", name)
+		*v = 100
 	}
 }
 

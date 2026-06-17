@@ -84,7 +84,7 @@ alerts:
     threshold: 85
     resolve_below: 80
     for: 2m
-    severity: critical
+    severity: warning
   disk:
     threshold: 85
     resolve_below: 80
@@ -92,9 +92,9 @@ alerts:
     severity: warning
     mounts:
       - /
-      - /home
-      - /var
-      - /boot
+      # Add any other mount points you want monitored, e.g.:
+      # - /var
+      # - /mnt/data
   load:
     threshold: 4
     resolve_below: 3
@@ -103,6 +103,11 @@ alerts:
   cpu:
     threshold: 85
     resolve_below: 80
+    for: 2m
+    severity: warning
+  swap:
+    threshold: 80
+    resolve_below: 75
     for: 2m
     severity: warning
   systemd:
@@ -119,6 +124,19 @@ alerts:
     #     url: "https://example.com/health"
     #     timeout: 5s
     #     expected_status: 200
+  tcp:
+    severity: critical
+    checks: []
+    # checks:
+    #   - name: redis
+    #     address: "127.0.0.1:6379"
+    #     timeout: 5s
+  process:
+    severity: critical
+    names: []
+    # names:
+    #   - nginx
+    #   - postgres
 
 # Alerts fan out to every notifier you configure. Uncomment the ones you want,
 # then restart the service.
@@ -137,7 +155,7 @@ notifiers:
   # pagerduty:
   #   integration_key: "pagerduty-events-api-v2-key"
   # webhook:
-  #   url: "https://example.com/hooks/lookout"
+  #   webhook_url: "https://example.com/hooks/lookout"
   # email:
   #   host: "smtp.example.com"
   #   port: 587
