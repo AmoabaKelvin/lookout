@@ -78,7 +78,8 @@ func safeURL(raw string) string {
 // unwrapURL strips the address from a *url.Error so the underlying cause can be
 // logged without the secret-bearing URL it carries.
 func unwrapURL(err error) error {
-	if ue, ok := err.(*url.Error); ok {
+	var ue *url.Error
+	if errors.As(err, &ue) {
 		return ue.Err
 	}
 	return err
@@ -135,11 +136,11 @@ func postJSON(url string, payload any) error {
 
 		resp, err := httpClient.Post(url, "application/json", bytes.NewReader(body))
 		if err != nil {
-			lastErr = fmt.Errorf("%s: %v", safeURL(url), unwrapURL(err))
+			lastErr = fmt.Errorf("%s: %w", safeURL(url), unwrapURL(err))
 		} else {
 			status := resp.StatusCode
 			retryAfter := resp.Header.Get("Retry-After")
-			io.Copy(io.Discard, resp.Body) // drain so the connection can be reused
+			_, _ = io.Copy(io.Discard, resp.Body) // drain so the connection can be reused
 			resp.Body.Close()
 
 			if status >= 200 && status < 300 {
@@ -200,11 +201,12 @@ type SlackNotifier struct {
 
 func (s *SlackNotifier) Send(alert Alert) error {
 	v := visualFor(alert)
+	text := formatAlert(alert)
 	return postJSON(s.WebhookURL, map[string]any{
 		"attachments": []map[string]any{{
 			"color":    v.slackColor,
-			"text":     formatAlert(alert),
-			"fallback": formatAlert(alert),
+			"text":     text,
+			"fallback": text,
 		}},
 	})
 }

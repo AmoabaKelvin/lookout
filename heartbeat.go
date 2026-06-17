@@ -7,7 +7,7 @@ import "fmt"
 func PingRemote(addr string) error {
 	resp, err := httpClient.Get(addr)
 	if err != nil {
-		return fmt.Errorf("%s: %v", safeURL(addr), unwrapURL(err))
+		return fmt.Errorf("%s: %w", safeURL(addr), unwrapURL(err))
 	}
 
 	defer resp.Body.Close()
