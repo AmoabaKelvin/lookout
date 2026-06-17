@@ -1,6 +1,9 @@
 package main
 
-import "testing"
+import (
+	"testing"
+	"time"
+)
 
 func TestDiskCollectorCollectsTargetMount(t *testing.T) {
 	samples, err := diskCollector("testdata/mounts.txt", []string{"/"})
@@ -51,5 +54,43 @@ func TestMountPointToName(t *testing.T) {
 		if got := mountPointToName(mount); got != want {
 			t.Fatalf("mountPointToName(%q) = %q, want %q", mount, got, want)
 		}
+	}
+}
+
+func TestDiskFillPredictorReportsGrowthRisk(t *testing.T) {
+	predictor := newDiskFillPredictor()
+	first := []MetricSample{
+		{Name: "disk.root.total", Value: 100, Timestamp: time.Unix(0, 0), Collector: "disk"},
+		{Name: "disk.root.used", Value: 50, Timestamp: time.Unix(0, 0), Collector: "disk"},
+	}
+	second := []MetricSample{
+		{Name: "disk.root.total", Value: 100, Timestamp: time.Unix(60, 0), Collector: "disk"},
+		{Name: "disk.root.used", Value: 75, Timestamp: time.Unix(60, 0), Collector: "disk"},
+	}
+
+	values := metricValues(predictor.collect(first, 2*time.Minute))
+	if values["disk.root.fills_within_window"] != 0 {
+		t.Fatalf("first sample should not predict fill risk: %+v", values)
+	}
+
+	values = metricValues(predictor.collect(second, 2*time.Minute))
+	if values["disk.root.fills_within_window"] != 1 {
+		t.Fatalf("growing disk should predict fill risk: %+v", values)
+	}
+}
+
+func TestDiskFillPredictorIgnoresShrinkingDisk(t *testing.T) {
+	predictor := newDiskFillPredictor()
+	predictor.collect([]MetricSample{
+		{Name: "disk.root.total", Value: 100, Timestamp: time.Unix(0, 0), Collector: "disk"},
+		{Name: "disk.root.used", Value: 75, Timestamp: time.Unix(0, 0), Collector: "disk"},
+	}, time.Hour)
+
+	values := metricValues(predictor.collect([]MetricSample{
+		{Name: "disk.root.total", Value: 100, Timestamp: time.Unix(60, 0), Collector: "disk"},
+		{Name: "disk.root.used", Value: 50, Timestamp: time.Unix(60, 0), Collector: "disk"},
+	}, time.Hour))
+	if values["disk.root.fills_within_window"] != 0 {
+		t.Fatalf("shrinking disk should not predict fill risk: %+v", values)
 	}
 }
