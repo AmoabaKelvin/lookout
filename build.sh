@@ -27,13 +27,17 @@ for arch in amd64 arm64; do
     -o "$out" .
 done
 
+# Ship the example config as a release asset so install.sh installs it verbatim,
+# keeping deploy/config.example.yaml the single source of truth for the template.
+cp deploy/config.example.yaml "$OUT_DIR/config.example.yaml"
+
 # Checksums let install.sh verify downloads weren't corrupted or tampered with.
 # Linux has sha256sum; macOS has shasum. Both emit the same "<hash>  <file>" format.
 echo "writing checksums"
 if command -v sha256sum >/dev/null 2>&1; then
-  ( cd "$OUT_DIR" && sha256sum "${BINARY}-linux-"* > checksums.txt )
+  ( cd "$OUT_DIR" && sha256sum "${BINARY}-linux-"* config.example.yaml > checksums.txt )
 else
-  ( cd "$OUT_DIR" && shasum -a 256 "${BINARY}-linux-"* > checksums.txt )
+  ( cd "$OUT_DIR" && shasum -a 256 "${BINARY}-linux-"* config.example.yaml > checksums.txt )
 fi
 
 echo
