@@ -82,6 +82,9 @@ func TestLoadConfigDefaults(t *testing.T) {
 	if cfg.Docker.RestartThreshold != 3 || cfg.Docker.RestartWindow.Std() != 10*time.Minute {
 		t.Errorf("docker restart defaults: %+v", cfg.Docker)
 	}
+	if cfg.Metrics.Enabled || cfg.Metrics.Listen != "127.0.0.1:9100" {
+		t.Errorf("metrics defaults: %+v", cfg.Metrics)
+	}
 	if len(cfg.Alerts.Disk.Mounts) == 0 {
 		t.Errorf("expected default mounts")
 	}
@@ -156,6 +159,9 @@ docker:
   severity: warning
   restart_threshold: 5
   restart_window: 3m
+metrics:
+  enabled: true
+  listen: "127.0.0.1:9200"
 `))
 	if err != nil {
 		t.Fatal(err)
@@ -243,6 +249,9 @@ docker:
 	}
 	if !cfg.Docker.Enabled || cfg.Docker.Severity != SeverityWarning || cfg.Docker.RestartThreshold != 5 || cfg.Docker.RestartWindow.Std() != 3*time.Minute {
 		t.Errorf("docker overrides not applied: %+v", cfg.Docker)
+	}
+	if !cfg.Metrics.Enabled || cfg.Metrics.Listen != "127.0.0.1:9200" {
+		t.Errorf("metrics overrides not applied: %+v", cfg.Metrics)
 	}
 }
 

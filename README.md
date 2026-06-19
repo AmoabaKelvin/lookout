@@ -76,6 +76,10 @@ A minimal useful config might look like this:
 collection_interval: 30s
 state_file: /var/lib/lookout/state.json
 
+metrics:
+  enabled: false
+  listen: "127.0.0.1:9100"
+
 alerts:
   renotify_after: 1h
   stale_after: 90s
@@ -162,6 +166,21 @@ Lookout sends the first alert. Set it to `0s` if you want immediate alerts.
 three times the collection interval.
 
 Durations use Go-style strings such as `5s`, `2m`, and `1h`.
+
+### Prometheus metrics
+
+Lookout can expose the latest collected values as Prometheus text at
+`GET /metrics`. This is disabled by default and keeps only the current in-memory
+snapshot; it does not add storage, retention, dashboards, or a query layer.
+
+```yaml
+metrics:
+  enabled: true
+  listen: "127.0.0.1:9100"
+```
+
+Keep the listener on localhost or a private interface unless you place it behind
+a firewall or reverse proxy.
 
 ### Severity
 

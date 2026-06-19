@@ -77,6 +77,12 @@ if [ ! -f "$CONF_FILE" ]; then
 collection_interval: 30s
 state_file: /var/lib/lookout/state.json
 
+# Optional Prometheus text endpoint. It serves the latest collected values only;
+# Lookout does not store history.
+metrics:
+  enabled: false
+  listen: "127.0.0.1:9100"
+
 alerts:
   renotify_after: 1h
   stale_after: 90s

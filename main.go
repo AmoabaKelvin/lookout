@@ -73,79 +73,12 @@ func main() {
 	notifierQueue := newAsyncNotifier(notifiers, notifierQueueSize)
 	go notifierQueue.Run(ctx)
 
-	rules := []Rule{
-		{
-			ID:           "memory",
-			Matcher:      func(s MetricSample) bool { return s.Name == "memory.used_percent" },
-			Threshold:    cfg.Alerts.Memory.Threshold,
-			ResolveBelow: *cfg.Alerts.Memory.ResolveBelow,
-			Message:      "High memory usage",
-			Severity:     cfg.Alerts.Memory.Severity,
-			For:          cfg.Alerts.Memory.For.Std(),
-		},
-		{
-			ID:           "disk",
-			Matcher:      func(s MetricSample) bool { return s.Collector == "disk" && strings.HasSuffix(s.Name, ".used_percent") },
-			Threshold:    cfg.Alerts.Disk.Threshold,
-			ResolveBelow: *cfg.Alerts.Disk.ResolveBelow,
-			Message:      "High disk usage",
-			Severity:     cfg.Alerts.Disk.Severity,
-			For:          cfg.Alerts.Disk.For.Std(),
-		},
-		{
-			ID:           "load",
-			Matcher:      func(s MetricSample) bool { return s.Name == "load.1_per_core" },
-			Threshold:    cfg.Alerts.Load.Threshold,
-			ResolveBelow: *cfg.Alerts.Load.ResolveBelow,
-			Message:      "High 1-minute load per core",
-			Severity:     cfg.Alerts.Load.Severity,
-			For:          cfg.Alerts.Load.For.Std(),
-		},
-		{
-			ID:           "cpu",
-			Matcher:      func(s MetricSample) bool { return s.Name == "cpu.used_percent" },
-			Threshold:    cfg.Alerts.CPU.Threshold,
-			ResolveBelow: *cfg.Alerts.CPU.ResolveBelow,
-			Message:      "High CPU usage",
-			Severity:     cfg.Alerts.CPU.Severity,
-			For:          cfg.Alerts.CPU.For.Std(),
-		},
-		{
-			ID:           "swap",
-			Matcher:      func(s MetricSample) bool { return s.Name == "swap.used_percent" },
-			Threshold:    cfg.Alerts.Swap.Threshold,
-			ResolveBelow: *cfg.Alerts.Swap.ResolveBelow,
-			Message:      "High swap usage",
-			Severity:     cfg.Alerts.Swap.Severity,
-			For:          cfg.Alerts.Swap.For.Std(),
-		},
-	}
-	if cfg.Alerts.Disk.PredictFullWithin.Std() > 0 {
-		rules = append(rules, Rule{
-			ID: "disk-fill",
-			Matcher: func(s MetricSample) bool {
-				return s.Collector == "disk" && strings.HasSuffix(s.Name, ".fills_within_window")
-			},
-			Threshold:    0,
-			ResolveBelow: 0,
-			Message:      "Disk predicted to fill soon",
-			Severity:     cfg.Alerts.Disk.Severity,
-			For:          cfg.Alerts.Disk.For.Std(),
-		})
-	}
-	for _, family := range checkFamilies(cfg) {
-		for _, dc := range family.derived() {
-			metricName := dc.metricName
-			rules = append(rules, Rule{
-				ID:       dc.ruleID,
-				Matcher:  func(s MetricSample) bool { return s.Name == metricName },
-				Message:  family.message + dc.label,
-				Severity: family.severity,
-			})
-		}
+	metricSnapshot := newMetricsSnapshot(cfg.Hostname, version)
+	if err := startMetricsServer(ctx, cfg.Metrics, metricSnapshot); err != nil {
+		log.Fatalf("metrics: %v", err)
 	}
 
-	alertManager := NewAlertManager(rules, cfg.Alerts.RenotifyAfter.Std(), cfg.Hostname, []Notifier{notifierQueue})
+	alertManager := NewAlertManager(buildRules(cfg), cfg.Alerts.RenotifyAfter.Std(), cfg.Hostname, []Notifier{notifierQueue})
 	alertManager.stateFile = cfg.StateFile
 	alertManager.staleAfter = cfg.Alerts.StaleAfter.Std()
 	alertManager.tracked = trackedMetrics(cfg)
@@ -164,27 +97,7 @@ func main() {
 		defer cli.Close()
 	}
 
-	if cfg.Heartbeat.URL != "" {
-		go func() {
-			if err := PingRemote(cfg.Heartbeat.URL); err != nil {
-				fmt.Printf("Initial heartbeat failed: %v\n", err)
-			}
-
-			ticker := time.NewTicker(cfg.Heartbeat.Interval.Std())
-			defer ticker.Stop()
-
-			for {
-				select {
-				case <-ctx.Done():
-					return
-				case <-ticker.C:
-					if err := PingRemote(cfg.Heartbeat.URL); err != nil {
-						fmt.Printf("Heartbeat failed: %v\n", err)
-					}
-				}
-			}
-		}()
-	}
+	startHeartbeat(ctx, cfg.Heartbeat)
 
 	evaluatorEvents := make(chan evaluatorEvent, 100)
 	dockerEventsChannel := make(chan DockerEvent, 100)
@@ -273,6 +186,7 @@ func main() {
 	var cpuPrevious *cpuTimes
 	diskPredictor := newDiskFillPredictor()
 	publish := func(samples []MetricSample) {
+		metricSnapshot.Update(samples)
 		for _, d := range samples {
 			evaluatorEvents <- evaluatorEvent{sample: d, hasSample: true}
 		}
@@ -329,6 +243,106 @@ func main() {
 			collect()
 		}
 	}
+}
+
+func buildRules(cfg Config) []Rule {
+	rules := []Rule{
+		{
+			ID:           "memory",
+			Matcher:      func(s MetricSample) bool { return s.Name == "memory.used_percent" },
+			Threshold:    cfg.Alerts.Memory.Threshold,
+			ResolveBelow: *cfg.Alerts.Memory.ResolveBelow,
+			Message:      "High memory usage",
+			Severity:     cfg.Alerts.Memory.Severity,
+			For:          cfg.Alerts.Memory.For.Std(),
+		},
+		{
+			ID:           "disk",
+			Matcher:      func(s MetricSample) bool { return s.Collector == "disk" && strings.HasSuffix(s.Name, ".used_percent") },
+			Threshold:    cfg.Alerts.Disk.Threshold,
+			ResolveBelow: *cfg.Alerts.Disk.ResolveBelow,
+			Message:      "High disk usage",
+			Severity:     cfg.Alerts.Disk.Severity,
+			For:          cfg.Alerts.Disk.For.Std(),
+		},
+		{
+			ID:           "load",
+			Matcher:      func(s MetricSample) bool { return s.Name == "load.1_per_core" },
+			Threshold:    cfg.Alerts.Load.Threshold,
+			ResolveBelow: *cfg.Alerts.Load.ResolveBelow,
+			Message:      "High 1-minute load per core",
+			Severity:     cfg.Alerts.Load.Severity,
+			For:          cfg.Alerts.Load.For.Std(),
+		},
+		{
+			ID:           "cpu",
+			Matcher:      func(s MetricSample) bool { return s.Name == "cpu.used_percent" },
+			Threshold:    cfg.Alerts.CPU.Threshold,
+			ResolveBelow: *cfg.Alerts.CPU.ResolveBelow,
+			Message:      "High CPU usage",
+			Severity:     cfg.Alerts.CPU.Severity,
+			For:          cfg.Alerts.CPU.For.Std(),
+		},
+		{
+			ID:           "swap",
+			Matcher:      func(s MetricSample) bool { return s.Name == "swap.used_percent" },
+			Threshold:    cfg.Alerts.Swap.Threshold,
+			ResolveBelow: *cfg.Alerts.Swap.ResolveBelow,
+			Message:      "High swap usage",
+			Severity:     cfg.Alerts.Swap.Severity,
+			For:          cfg.Alerts.Swap.For.Std(),
+		},
+	}
+	if cfg.Alerts.Disk.PredictFullWithin.Std() > 0 {
+		rules = append(rules, Rule{
+			ID: "disk-fill",
+			Matcher: func(s MetricSample) bool {
+				return s.Collector == "disk" && strings.HasSuffix(s.Name, ".fills_within_window")
+			},
+			Threshold:    0,
+			ResolveBelow: 0,
+			Message:      "Disk predicted to fill soon",
+			Severity:     cfg.Alerts.Disk.Severity,
+			For:          cfg.Alerts.Disk.For.Std(),
+		})
+	}
+	for _, family := range checkFamilies(cfg) {
+		for _, dc := range family.derived() {
+			metricName := dc.metricName
+			rules = append(rules, Rule{
+				ID:       dc.ruleID,
+				Matcher:  func(s MetricSample) bool { return s.Name == metricName },
+				Message:  family.message + dc.label,
+				Severity: family.severity,
+			})
+		}
+	}
+	return rules
+}
+
+func startHeartbeat(ctx context.Context, cfg HeartbeatConfig) {
+	if cfg.URL == "" {
+		return
+	}
+	go func() {
+		if err := PingRemote(cfg.URL); err != nil {
+			fmt.Printf("Initial heartbeat failed: %v\n", err)
+		}
+
+		ticker := time.NewTicker(cfg.Interval.Std())
+		defer ticker.Stop()
+
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				if err := PingRemote(cfg.URL); err != nil {
+					fmt.Printf("Heartbeat failed: %v\n", err)
+				}
+			}
+		}
+	}()
 }
 
 func trackedMetrics(cfg Config) []TrackedMetric {
