@@ -28,6 +28,13 @@ func TestProcessCollectorReportsPresentAndMissingProcesses(t *testing.T) {
 	}
 }
 
+func TestProcessCollectorSkipsScanWhenNoProcessesConfigured(t *testing.T) {
+	samples := processCollector(filepath.Join(t.TempDir(), "missing-proc"), []string{"", "  "})
+	if len(samples) != 0 {
+		t.Fatalf("expected no samples without configured process checks, got %+v", samples)
+	}
+}
+
 func writeProcess(t *testing.T, proc string, pid string, comm string, cmdline string) {
 	t.Helper()
 	dir := filepath.Join(proc, pid)

@@ -110,6 +110,7 @@ func (s *metricsSnapshot) Render() string {
 	})
 
 	var b strings.Builder
+	b.Grow(256 + len(samples)*128)
 	emittedTypes := make(map[string]bool)
 	s.renderSelfMetrics(&b, emittedTypes, lastCollection)
 	for _, sample := range samples {
@@ -165,21 +166,25 @@ func startMetricsServer(ctx context.Context, cfg MetricsConfig, snapshot *metric
 }
 
 func (s *metricsSnapshot) prometheusMetric(sample MetricSample) (string, string) {
-	parts := strings.Split(sample.Name, ".")
-
 	switch {
-	case sample.Collector == "disk" && len(parts) >= 3 && parts[0] == "disk":
-		field := strings.Join(parts[2:], "_")
-		return safePrometheusName("disk_" + field), prometheusLabels("host", s.host, "mount", parts[1])
+	case sample.Collector == "disk":
+		mount, field, ok := splitDiskMetric(sample.Name)
+		if !ok {
+			break
+		}
+		return safePrometheusName("disk_" + field), prometheusLabels("host", s.host, "mount", mount)
 
-	case len(parts) >= 3 && isStateCollector(parts[0]):
-		field := parts[len(parts)-1]
-		target := strings.Join(parts[1:len(parts)-1], "_")
-		return safePrometheusName(parts[0] + "_" + field), prometheusLabels("host", s.host, "name", target)
+	case isStateCollector(sample.Collector):
+		target, field, ok := splitStateMetric(sample)
+		if !ok {
+			break
+		}
+		return safePrometheusName(sample.Collector + "_" + field), prometheusLabels("host", s.host, "name", target)
 
 	default:
 		return safePrometheusName(sample.Name), prometheusLabels("host", s.host)
 	}
+	return "", ""
 }
 
 func writePrometheusSample(b *strings.Builder, emittedTypes map[string]bool, name string, labels string, value float64, timestamp time.Time) {
@@ -192,10 +197,11 @@ func writePrometheusSample(b *strings.Builder, emittedTypes map[string]bool, nam
 	b.WriteString(name)
 	b.WriteString(labels)
 	b.WriteByte(' ')
-	b.WriteString(strconv.FormatFloat(value, 'f', -1, 64))
+	var buf [64]byte
+	b.Write(strconv.AppendFloat(buf[:0], value, 'f', -1, 64))
 	if !timestamp.IsZero() {
 		b.WriteByte(' ')
-		b.WriteString(strconv.FormatInt(timestamp.UnixMilli(), 10))
+		b.Write(strconv.AppendInt(buf[:0], timestamp.UnixMilli(), 10))
 	}
 	b.WriteByte('\n')
 }
@@ -207,6 +213,19 @@ func isStateCollector(collector string) bool {
 	default:
 		return false
 	}
+}
+
+func splitStateMetric(sample MetricSample) (string, string, bool) {
+	prefix := sample.Collector + "."
+	if !strings.HasPrefix(sample.Name, prefix) {
+		return "", "", false
+	}
+	rest := strings.TrimPrefix(sample.Name, prefix)
+	i := strings.LastIndexByte(rest, '.')
+	if i <= 0 || i == len(rest)-1 {
+		return "", "", false
+	}
+	return rest[:i], rest[i+1:], true
 }
 
 func safePrometheusName(value string) string {
