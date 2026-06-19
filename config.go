@@ -38,6 +38,7 @@ type Config struct {
 	Notifiers          NotifiersConfig `yaml:"notifiers"`
 	Heartbeat          HeartbeatConfig `yaml:"heartbeat"`
 	Docker             DockerConfig    `yaml:"docker"`
+	Metrics            MetricsConfig   `yaml:"metrics"`
 
 	Hostname string `yaml:"-"` // derived at load time, not from the file
 }
@@ -174,6 +175,11 @@ type DockerConfig struct {
 	RestartWindow    Duration `yaml:"restart_window"`
 }
 
+type MetricsConfig struct {
+	Enabled bool   `yaml:"enabled"`
+	Listen  string `yaml:"listen"`
+}
+
 func defaultConfig() Config {
 	return Config{
 		CollectionInterval: Duration(30 * time.Second),
@@ -219,6 +225,10 @@ func defaultConfig() Config {
 			RestartThreshold: 3,
 			RestartWindow:    Duration(10 * time.Minute),
 		},
+		Metrics: MetricsConfig{
+			Enabled: false,
+			Listen:  "127.0.0.1:9100",
+		},
 	}
 }
 
@@ -254,6 +264,7 @@ func (c *Config) validate() {
 		c.CollectionInterval = Duration(floor)
 	}
 	defaultString(&c.StateFile, defaultStateFile)
+	defaultString(&c.Metrics.Listen, "127.0.0.1:9100")
 	clampInterval(&c.Heartbeat.Interval, 60*time.Second, "heartbeat.interval")
 	clampInterval(&c.Alerts.RenotifyAfter, time.Hour, "alerts.renotify_after")
 	if c.Alerts.StaleAfter.Std() <= 0 {
