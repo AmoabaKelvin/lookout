@@ -51,15 +51,9 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	notifiers, activeNotifiers, err := buildNotifiers(cfg.Notifiers)
+	notifiers, err := initNotifiers(cfg.Notifiers)
 	if err != nil {
 		log.Fatalf("notifiers: %v", err)
-	}
-	if len(notifiers) == 0 {
-		notifiers = append(notifiers, &ConsoleNotifier{})
-		fmt.Println("No notifier configured; alerts will print to the console")
-	} else {
-		fmt.Printf("Active notifiers: %s\n", strings.Join(activeNotifiers, ", "))
 	}
 
 	// A malformed heartbeat URL never pings, which silently inverts the
@@ -89,7 +83,6 @@ func main() {
 	// only build the docker client when enabled; client.New would otherwise fail startup
 	var cli *client.Client
 	if cfg.Docker.Enabled {
-		var err error
 		cli, err = client.New(client.FromEnv)
 		if err != nil {
 			log.Fatalf("docker: %v", err)
@@ -100,222 +93,343 @@ func main() {
 	startHeartbeat(ctx, cfg.Heartbeat)
 
 	evaluatorEvents := make(chan evaluatorEvent, 100)
-	dockerEventsChannel := make(chan DockerEvent, 100)
-	dockerEventsEvaluationChannel := make(chan dockerEvaluation, 100)
-	containers := make(map[string]*ContainerState)
-	dockerStateFile := dockerStatePath(cfg.StateFile)
+	dockerEvents := make(chan DockerEvent, 100)
+
+	ev := newEvaluator(alertManager, cfg, cli)
+	// Reconcile persisted docker state before run() starts, while the evaluator
+	// still has sole access to its container map.
 	if cfg.Docker.Enabled {
-		containers, err = loadDockerState(dockerStateFile)
-		if err != nil {
+		if err := ev.reconcileDockerState(ctx); err != nil {
 			log.Fatalf("docker state: %v", err)
 		}
-		snapshots, err := dockerContainerSnapshots(ctx, cli, containers)
-		if err != nil {
-			log.Printf("docker: failed to reconcile running containers: %v", err)
-		} else {
-			for _, alert := range reconcileDockerAlerts(containers, snapshots, cfg.Hostname, cfg.Docker) {
-				alertManager.dispatch(alert)
-			}
-			if err := saveDockerState(dockerStateFile, containers); err != nil {
-				log.Printf("error saving docker state: %v", err)
-			}
-		}
 	}
-	saveDockerStateFile := func() {
-		if !cfg.Docker.Enabled {
-			return
-		}
-		if err := saveDockerState(dockerStateFile, containers); err != nil {
-			log.Printf("error saving docker state: %v", err)
-		}
-	}
-
-	// single evaluator goroutine owns the alert + container state, so no mutex is needed
-	go func() {
-		for {
-			select {
-			case event, ok := <-evaluatorEvents:
-				if !ok {
-					return
-				}
-				if event.hasSample {
-					alertManager.Evaluate(event.sample)
-				}
-				if event.checkStale {
-					alertManager.CheckStale()
-				}
-
-			case dockerEvent, ok := <-dockerEventsChannel:
-				if !ok {
-					return
-				}
-				if alerts := handleDockerEvent(containers, dockerEvent, dockerEventsEvaluationChannel, cfg.Hostname, cfg.Docker); len(alerts) > 0 {
-					for _, alert := range alerts {
-						alertManager.dispatch(alert)
-					}
-					saveDockerStateFile()
-				}
-
-			case pendingEvaluation, ok := <-dockerEventsEvaluationChannel:
-				if !ok {
-					continue
-				}
-				if container := containers[pendingEvaluation.ID]; container != nil {
-					var alert *Alert
-					switch pendingEvaluation.Kind {
-					case "restart":
-						alert = evaluateDockerRestartLoop(container, cfg.Hostname, cfg.Docker, time.Now())
-					default:
-						alert = evaluateContainer(container, cfg.Hostname, cfg.Docker)
-					}
-					if alert != nil {
-						alertManager.dispatch(*alert)
-						saveDockerStateFile()
-					}
-				}
-			}
-		}
-	}()
+	go ev.run(ctx, evaluatorEvents, dockerEvents)
 
 	fmt.Printf("Starting lookout %s on %s (Ctrl+C to stop)\n", version, cfg.Hostname)
 
 	if cfg.Docker.Enabled {
-		go dockerCollector(ctx, cli, dockerEventsChannel)
+		go dockerCollector(ctx, cli, dockerEvents)
 	}
 
-	var cpuPrevious *cpuTimes
-	diskPredictor := newDiskFillPredictor()
-	publish := func(samples []MetricSample) {
-		metricSnapshot.Update(samples)
-		for _, d := range samples {
-			evaluatorEvents <- evaluatorEvent{sample: d, hasSample: true}
-		}
-	}
-	emit := func(label string, samples []MetricSample, err error) {
-		if err != nil {
-			fmt.Printf("Error collecting %s info: %v\n", label, err)
-			return
-		}
-		publish(samples)
-	}
-	collect := func() {
-		memData, err := memoryCollector(procMeminfo)
-		emit("memory", memData, err)
-
-		diskData, err := diskCollector(procMounts, cfg.Alerts.Disk.Mounts)
-		if err != nil {
-			fmt.Printf("Error collecting disk info: %v\n", err)
-		} else {
-			publish(diskData)
-			publish(diskPredictor.collect(diskData, cfg.Alerts.Disk.PredictFullWithin.Std()))
-		}
-
-		loadData, err := loadCollector(procLoadavg, runtime.NumCPU())
-		emit("load", loadData, err)
-
-		// CPU is the one collector that threads state (cpuPrevious) between runs.
-		cpuData, nextCPU, err := cpuCollector(procStat, cpuPrevious)
-		if err != nil {
-			fmt.Printf("Error collecting cpu info: %v\n", err)
-		} else {
-			cpuPrevious = nextCPU
-			publish(cpuData)
-		}
-
-		publish(systemdCollector(cfg.Alerts.Systemd.Services))
-		publish(httpCollector(cfg.Alerts.HTTP.Checks))
-		publish(tcpCollector(cfg.Alerts.TCP.Checks))
-		publish(processCollector(procDir, cfg.Alerts.Process.Names))
-
-		evaluatorEvents <- evaluatorEvent{checkStale: true}
-	}
+	collector := newMetricCollector(cfg, metricSnapshot, evaluatorEvents)
 
 	ticker := time.NewTicker(cfg.CollectionInterval.Std())
 	defer ticker.Stop()
 
-	collect() // collect once at startup instead of waiting a full interval
+	collector.collectOnce() // collect once at startup instead of waiting a full interval
 	for {
 		select {
 		case <-ctx.Done():
 			fmt.Println("Shutting down")
 			return
 		case <-ticker.C:
-			collect()
+			collector.collectOnce()
 		}
 	}
 }
 
-func buildRules(cfg Config) []Rule {
-	rules := []Rule{
+// initNotifiers builds the configured notifiers, falling back to console output
+// when none are set, and reports which channels are active.
+func initNotifiers(cfg NotifiersConfig) ([]Notifier, error) {
+	notifiers, active, err := buildNotifiers(cfg)
+	if err != nil {
+		return nil, err
+	}
+	if len(notifiers) == 0 {
+		fmt.Println("No notifier configured; alerts will print to the console")
+		return []Notifier{&ConsoleNotifier{}}, nil
+	}
+	fmt.Printf("Active notifiers: %s\n", strings.Join(active, ", "))
+	return notifiers, nil
+}
+
+// metricCollector runs one full collection pass per tick: it gathers each
+// collector's samples, publishes them to the snapshot and the evaluator, and
+// threads the per-run state (previous CPU times, disk-fill history) between runs.
+type metricCollector struct {
+	cfg           Config
+	snapshot      *metricsSnapshot
+	events        chan<- evaluatorEvent
+	cpuPrevious   *cpuTimes
+	diskPredictor *diskFillPredictor
+}
+
+func newMetricCollector(cfg Config, snapshot *metricsSnapshot, events chan<- evaluatorEvent) *metricCollector {
+	return &metricCollector{
+		cfg:           cfg,
+		snapshot:      snapshot,
+		events:        events,
+		diskPredictor: newDiskFillPredictor(),
+	}
+}
+
+func (c *metricCollector) publish(samples []MetricSample) {
+	c.snapshot.Update(samples)
+	for _, s := range samples {
+		c.events <- evaluatorEvent{sample: s, hasSample: true}
+	}
+}
+
+func (c *metricCollector) emit(label string, samples []MetricSample, err error) {
+	if err != nil {
+		fmt.Printf("Error collecting %s info: %v\n", label, err)
+		return
+	}
+	c.publish(samples)
+}
+
+func (c *metricCollector) collectOnce() {
+	memData, err := memoryCollector(procMeminfo)
+	c.emit("memory", memData, err)
+
+	diskData, err := diskCollector(procMounts, c.cfg.Alerts.Disk.Mounts)
+	if err != nil {
+		fmt.Printf("Error collecting disk info: %v\n", err)
+	} else {
+		c.publish(diskData)
+		c.publish(c.diskPredictor.collect(diskData, c.cfg.Alerts.Disk.PredictFullWithin.Std()))
+	}
+
+	loadData, err := loadCollector(procLoadavg, runtime.NumCPU())
+	c.emit("load", loadData, err)
+
+	// CPU is the one collector that threads state (cpuPrevious) between runs.
+	cpuData, nextCPU, err := cpuCollector(procStat, c.cpuPrevious)
+	if err != nil {
+		fmt.Printf("Error collecting cpu info: %v\n", err)
+	} else {
+		c.cpuPrevious = nextCPU
+		c.publish(cpuData)
+	}
+
+	c.publish(systemdCollector(c.cfg.Alerts.Systemd.Services))
+	c.publish(httpCollector(c.cfg.Alerts.HTTP.Checks))
+	c.publish(tcpCollector(c.cfg.Alerts.TCP.Checks))
+	c.publish(processCollector(procDir, c.cfg.Alerts.Process.Names))
+
+	c.events <- evaluatorEvent{checkStale: true}
+}
+
+// evaluator is the single goroutine that owns the alert manager and container
+// state. Every mutation flows through run()'s channels, so no locking is needed.
+type evaluator struct {
+	alerts          *AlertManager
+	cfg             Config
+	cli             *client.Client
+	containers      map[string]*ContainerState
+	dockerStateFile string
+	dockerEvals     chan dockerEvaluation
+}
+
+func newEvaluator(alerts *AlertManager, cfg Config, cli *client.Client) *evaluator {
+	return &evaluator{
+		alerts:          alerts,
+		cfg:             cfg,
+		cli:             cli,
+		containers:      make(map[string]*ContainerState),
+		dockerStateFile: dockerStatePath(cfg.StateFile),
+		dockerEvals:     make(chan dockerEvaluation, 100),
+	}
+}
+
+// reconcileDockerState loads persisted container state and reconciles it against
+// the containers currently running, dispatching catch-up alerts. It must run
+// before run() starts, while the evaluator still has sole access to containers.
+func (e *evaluator) reconcileDockerState(ctx context.Context) error {
+	containers, err := loadDockerState(e.dockerStateFile)
+	if err != nil {
+		return err
+	}
+	e.containers = containers
+
+	snapshots, err := dockerContainerSnapshots(ctx, e.cli, containers)
+	if err != nil {
+		log.Printf("docker: failed to reconcile running containers: %v", err)
+		return nil
+	}
+	for _, alert := range reconcileDockerAlerts(containers, snapshots, e.cfg.Hostname, e.cfg.Docker) {
+		e.alerts.dispatch(alert)
+	}
+	e.persistDockerState()
+	return nil
+}
+
+func (e *evaluator) persistDockerState() {
+	if !e.cfg.Docker.Enabled {
+		return
+	}
+	if err := saveDockerState(e.dockerStateFile, e.containers); err != nil {
+		log.Printf("error saving docker state: %v", err)
+	}
+}
+
+func (e *evaluator) run(ctx context.Context, samples <-chan evaluatorEvent, dockerEvents <-chan DockerEvent) {
+	for {
+		select {
+		case event, ok := <-samples:
+			if !ok {
+				return
+			}
+			if event.hasSample {
+				e.alerts.Evaluate(event.sample)
+			}
+			if event.checkStale {
+				e.alerts.CheckStale()
+			}
+
+		case dockerEvent, ok := <-dockerEvents:
+			if !ok {
+				return
+			}
+			if alerts := handleDockerEvent(e.containers, dockerEvent, e.dockerEvals, e.cfg.Hostname, e.cfg.Docker); len(alerts) > 0 {
+				for _, alert := range alerts {
+					e.alerts.dispatch(alert)
+				}
+				e.persistDockerState()
+			}
+
+		case pending, ok := <-e.dockerEvals:
+			if !ok {
+				continue
+			}
+			if container := e.containers[pending.ID]; container != nil {
+				var alert *Alert
+				switch pending.Kind {
+				case "restart":
+					alert = evaluateDockerRestartLoop(container, e.cfg.Hostname, e.cfg.Docker, time.Now())
+				default:
+					alert = evaluateContainer(container, e.cfg.Hostname, e.cfg.Docker)
+				}
+				if alert != nil {
+					e.alerts.dispatch(*alert)
+					e.persistDockerState()
+				}
+			}
+		}
+	}
+}
+
+// ruleSpec pairs an alert rule with the metric names tracked under its ID for
+// staleness. Declaring both together is what keeps buildRules and trackedMetrics
+// from drifting: every rule names its tracked metrics in exactly one place.
+type ruleSpec struct {
+	rule    Rule
+	tracked []string
+}
+
+func buildRuleSpecs(cfg Config) []ruleSpec {
+	specs := []ruleSpec{
 		{
-			ID:           "memory",
-			Matcher:      func(s MetricSample) bool { return s.Name == "memory.used_percent" },
-			Threshold:    cfg.Alerts.Memory.Threshold,
-			ResolveBelow: *cfg.Alerts.Memory.ResolveBelow,
-			Message:      "High memory usage",
-			Severity:     cfg.Alerts.Memory.Severity,
-			For:          cfg.Alerts.Memory.For.Std(),
+			rule: Rule{
+				ID:           "memory",
+				Matcher:      func(s MetricSample) bool { return s.Name == "memory.used_percent" },
+				Threshold:    cfg.Alerts.Memory.Threshold,
+				ResolveBelow: *cfg.Alerts.Memory.ResolveBelow,
+				Message:      "High memory usage",
+				Severity:     cfg.Alerts.Memory.Severity,
+				For:          cfg.Alerts.Memory.For.Std(),
+			},
+			tracked: []string{"memory.used_percent"},
 		},
 		{
-			ID:           "disk",
-			Matcher:      func(s MetricSample) bool { return s.Collector == "disk" && strings.HasSuffix(s.Name, ".used_percent") },
-			Threshold:    cfg.Alerts.Disk.Threshold,
-			ResolveBelow: *cfg.Alerts.Disk.ResolveBelow,
-			Message:      "High disk usage",
-			Severity:     cfg.Alerts.Disk.Severity,
-			For:          cfg.Alerts.Disk.For.Std(),
+			rule: Rule{
+				ID:           "disk",
+				Matcher:      func(s MetricSample) bool { return s.Collector == "disk" && strings.HasSuffix(s.Name, ".used_percent") },
+				Threshold:    cfg.Alerts.Disk.Threshold,
+				ResolveBelow: *cfg.Alerts.Disk.ResolveBelow,
+				Message:      "High disk usage",
+				Severity:     cfg.Alerts.Disk.Severity,
+				For:          cfg.Alerts.Disk.For.Std(),
+			},
+			tracked: diskMetricNames(cfg, ".used_percent"),
 		},
 		{
-			ID:           "load",
-			Matcher:      func(s MetricSample) bool { return s.Name == "load.1_per_core" },
-			Threshold:    cfg.Alerts.Load.Threshold,
-			ResolveBelow: *cfg.Alerts.Load.ResolveBelow,
-			Message:      "High 1-minute load per core",
-			Severity:     cfg.Alerts.Load.Severity,
-			For:          cfg.Alerts.Load.For.Std(),
+			rule: Rule{
+				ID:           "load",
+				Matcher:      func(s MetricSample) bool { return s.Name == "load.1_per_core" },
+				Threshold:    cfg.Alerts.Load.Threshold,
+				ResolveBelow: *cfg.Alerts.Load.ResolveBelow,
+				Message:      "High 1-minute load per core",
+				Severity:     cfg.Alerts.Load.Severity,
+				For:          cfg.Alerts.Load.For.Std(),
+			},
+			tracked: []string{"load.1_per_core"},
 		},
 		{
-			ID:           "cpu",
-			Matcher:      func(s MetricSample) bool { return s.Name == "cpu.used_percent" },
-			Threshold:    cfg.Alerts.CPU.Threshold,
-			ResolveBelow: *cfg.Alerts.CPU.ResolveBelow,
-			Message:      "High CPU usage",
-			Severity:     cfg.Alerts.CPU.Severity,
-			For:          cfg.Alerts.CPU.For.Std(),
+			rule: Rule{
+				ID:           "cpu",
+				Matcher:      func(s MetricSample) bool { return s.Name == "cpu.used_percent" },
+				Threshold:    cfg.Alerts.CPU.Threshold,
+				ResolveBelow: *cfg.Alerts.CPU.ResolveBelow,
+				Message:      "High CPU usage",
+				Severity:     cfg.Alerts.CPU.Severity,
+				For:          cfg.Alerts.CPU.For.Std(),
+			},
+			tracked: []string{"cpu.used_percent"},
 		},
 		{
-			ID:           "swap",
-			Matcher:      func(s MetricSample) bool { return s.Name == "swap.used_percent" },
-			Threshold:    cfg.Alerts.Swap.Threshold,
-			ResolveBelow: *cfg.Alerts.Swap.ResolveBelow,
-			Message:      "High swap usage",
-			Severity:     cfg.Alerts.Swap.Severity,
-			For:          cfg.Alerts.Swap.For.Std(),
+			rule: Rule{
+				ID:           "swap",
+				Matcher:      func(s MetricSample) bool { return s.Name == "swap.used_percent" },
+				Threshold:    cfg.Alerts.Swap.Threshold,
+				ResolveBelow: *cfg.Alerts.Swap.ResolveBelow,
+				Message:      "High swap usage",
+				Severity:     cfg.Alerts.Swap.Severity,
+				For:          cfg.Alerts.Swap.For.Std(),
+			},
+			tracked: []string{"swap.used_percent"},
 		},
 	}
+
 	if cfg.Alerts.Disk.PredictFullWithin.Std() > 0 {
-		rules = append(rules, Rule{
-			ID: "disk-fill",
-			Matcher: func(s MetricSample) bool {
-				return s.Collector == "disk" && strings.HasSuffix(s.Name, ".fills_within_window")
+		specs = append(specs, ruleSpec{
+			rule: Rule{
+				ID: "disk-fill",
+				Matcher: func(s MetricSample) bool {
+					return s.Collector == "disk" && strings.HasSuffix(s.Name, ".fills_within_window")
+				},
+				Threshold:    0,
+				ResolveBelow: 0,
+				Message:      "Disk predicted to fill soon",
+				Severity:     cfg.Alerts.Disk.Severity,
+				For:          cfg.Alerts.Disk.For.Std(),
 			},
-			Threshold:    0,
-			ResolveBelow: 0,
-			Message:      "Disk predicted to fill soon",
-			Severity:     cfg.Alerts.Disk.Severity,
-			For:          cfg.Alerts.Disk.For.Std(),
+			tracked: diskMetricNames(cfg, ".fills_within_window"),
 		})
 	}
+
 	for _, family := range checkFamilies(cfg) {
 		for _, dc := range family.derived() {
 			metricName := dc.metricName
-			rules = append(rules, Rule{
-				ID:       dc.ruleID,
-				Matcher:  func(s MetricSample) bool { return s.Name == metricName },
-				Message:  family.message + dc.label,
-				Severity: family.severity,
+			specs = append(specs, ruleSpec{
+				rule: Rule{
+					ID:       dc.ruleID,
+					Matcher:  func(s MetricSample) bool { return s.Name == metricName },
+					Message:  family.message + dc.label,
+					Severity: family.severity,
+				},
+				tracked: []string{dc.metricName},
 			})
 		}
+	}
+	return specs
+}
+
+// diskMetricNames returns the metric name for each configured mount, e.g.
+// "disk.root.used_percent". It mirrors the names the disk collector emits.
+func diskMetricNames(cfg Config, suffix string) []string {
+	names := make([]string, 0, len(cfg.Alerts.Disk.Mounts))
+	for _, mount := range cfg.Alerts.Disk.Mounts {
+		names = append(names, "disk."+mountPointToName(mount)+suffix)
+	}
+	return names
+}
+
+func buildRules(cfg Config) []Rule {
+	specs := buildRuleSpecs(cfg)
+	rules := make([]Rule, 0, len(specs))
+	for _, spec := range specs {
+		rules = append(rules, spec.rule)
 	}
 	return rules
 }
@@ -346,28 +460,10 @@ func startHeartbeat(ctx context.Context, cfg HeartbeatConfig) {
 }
 
 func trackedMetrics(cfg Config) []TrackedMetric {
-	tracked := []TrackedMetric{
-		{RuleID: "memory", Name: "memory.used_percent"},
-		{RuleID: "load", Name: "load.1_per_core"},
-		{RuleID: "cpu", Name: "cpu.used_percent"},
-		{RuleID: "swap", Name: "swap.used_percent"},
-	}
-	for _, mount := range cfg.Alerts.Disk.Mounts {
-		name := mountPointToName(mount)
-		tracked = append(tracked, TrackedMetric{
-			RuleID: "disk",
-			Name:   "disk." + name + ".used_percent",
-		})
-		if cfg.Alerts.Disk.PredictFullWithin.Std() > 0 {
-			tracked = append(tracked, TrackedMetric{
-				RuleID: "disk-fill",
-				Name:   "disk." + name + ".fills_within_window",
-			})
-		}
-	}
-	for _, family := range checkFamilies(cfg) {
-		for _, dc := range family.derived() {
-			tracked = append(tracked, TrackedMetric{RuleID: dc.ruleID, Name: dc.metricName})
+	var tracked []TrackedMetric
+	for _, spec := range buildRuleSpecs(cfg) {
+		for _, name := range spec.tracked {
+			tracked = append(tracked, TrackedMetric{RuleID: spec.rule.ID, Name: name})
 		}
 	}
 	return tracked
