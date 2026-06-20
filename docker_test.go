@@ -99,6 +99,27 @@ func TestDockerQuickRestartSuppressesExitAlert(t *testing.T) {
 	}
 }
 
+func TestDockerRestartWithinDebounceSuppressesExitAlert(t *testing.T) {
+	containers := map[string]*ContainerState{}
+	cfg := testDockerConfig()
+	evalCh := dockerEvalChannel()
+
+	handleDockerEvent(containers, dockerDieEvent("abcdef123456", "api", "255"), evalCh, "host-a", cfg)
+	alerts := handleDockerEvent(containers, DockerEvent{
+		ID:         "abcdef123456",
+		Timestamp:  time.Unix(110, 0),
+		Action:     "start",
+		Attributes: map[string]string{"name": "api"},
+	}, evalCh, "host-a", cfg)
+	if len(alerts) > 0 {
+		t.Fatalf("restart within debounce should not resolve or fire an exit alert, got %+v", alerts)
+	}
+
+	if alert := evaluateContainer(containers["abcdef123456"], "host-a", cfg); alert != nil {
+		t.Fatalf("restart within debounce should suppress delayed exit alert, got %+v", alert)
+	}
+}
+
 func TestDockerRunningContainerDoesNotFireStalePendingDie(t *testing.T) {
 	cfg := testDockerConfig()
 	container := &ContainerState{

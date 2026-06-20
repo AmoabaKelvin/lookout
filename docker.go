@@ -42,8 +42,9 @@ const (
 )
 
 // dieDebounce is how long a die evaluation waits before deciding a container
-// has truly failed, so a quick restart can cancel the pending failure.
-const dieDebounce = 1500 * time.Millisecond
+// has truly failed, so Docker/Swarm restart policies can bring it back without
+// producing noisy exit/resolved alert pairs.
+const dieDebounce = 30 * time.Second
 
 // healthUnhealthy is Docker's container health status for a failing healthcheck.
 const healthUnhealthy = "unhealthy"
