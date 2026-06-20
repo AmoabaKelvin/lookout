@@ -342,7 +342,7 @@ func handleDockerEvent(containers map[string]*ContainerState, dockerEvent Docker
 		container.IntentionalStop = false
 		container.StartTimes = appendRecentTimes(container.StartTimes, dockerEvent.Timestamp, cfg.RestartWindow.Std())
 
-		if container.PendingDie && container.LastDieAt.Before(container.StartedAt) {
+		if container.PendingDie && !container.StartedAt.Before(container.LastDieAt) {
 			container.PendingDie = false
 		}
 		if container.IsAlerting {
@@ -402,6 +402,9 @@ func evaluateContainer(c *ContainerState, hostname string, cfg DockerConfig) *Al
 	}()
 
 	if !c.PendingDie {
+		return nil
+	}
+	if c.State == Running {
 		return nil
 	}
 	// A "stop" event means an operator stopped the container, so a non-zero exit

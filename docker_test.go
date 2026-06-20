@@ -78,6 +78,42 @@ func TestDockerCleanExitDoesNotAlert(t *testing.T) {
 	}
 }
 
+func TestDockerQuickRestartSuppressesExitAlert(t *testing.T) {
+	containers := map[string]*ContainerState{}
+	cfg := testDockerConfig()
+	evalCh := dockerEvalChannel()
+
+	handleDockerEvent(containers, dockerDieEvent("abcdef123456", "api", "255"), evalCh, "host-a", cfg)
+	alerts := handleDockerEvent(containers, DockerEvent{
+		ID:         "abcdef123456",
+		Timestamp:  time.Unix(100, 0),
+		Action:     "start",
+		Attributes: map[string]string{"name": "api"},
+	}, evalCh, "host-a", cfg)
+	if len(alerts) > 0 {
+		t.Fatalf("quick restart should not resolve or fire an exit alert, got %+v", alerts)
+	}
+
+	if alert := evaluateContainer(containers["abcdef123456"], "host-a", cfg); alert != nil {
+		t.Fatalf("quick restart should suppress delayed exit alert, got %+v", alert)
+	}
+}
+
+func TestDockerRunningContainerDoesNotFireStalePendingDie(t *testing.T) {
+	cfg := testDockerConfig()
+	container := &ContainerState{
+		ID:         "abcdef123456",
+		Name:       "api",
+		State:      Running,
+		LastExit:   255,
+		PendingDie: true,
+	}
+
+	if alert := evaluateContainer(container, "host-a", cfg); alert != nil {
+		t.Fatalf("running container should not fire stale pending die alert, got %+v", alert)
+	}
+}
+
 func TestDockerOOMBuildsAlert(t *testing.T) {
 	containers := map[string]*ContainerState{}
 	event := dockerDieEvent("abcdef123456", "worker", "137")
