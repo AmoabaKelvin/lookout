@@ -67,131 +67,27 @@ if ! id "$SERVICE_USER" >/dev/null 2>&1; then
   echo "Created system user '${SERVICE_USER}'"
 fi
 
-# --- config template (never overwrite an existing config) ---
+# --- config (downloaded with the release; never overwrite an existing config) ---
+# The template is deploy/config.example.yaml, shipped as a release asset, so the
+# config layout has a single source of truth instead of a copy embedded here.
 mkdir -p "$CONF_DIR"
-if [ ! -f "$CONF_FILE" ]; then
-  cat > "$CONF_FILE" <<'EOF'
-# Lookout configuration.
-# Durations are strings: 30s, 2m, 1h.
-
-collection_interval: 30s
-state_file: /var/lib/lookout/state.json
-
-# Optional Prometheus text endpoint. It serves the latest collected values only;
-# Lookout does not store history.
-metrics:
-  enabled: false
-  listen: "127.0.0.1:9100"
-
-alerts:
-  renotify_after: 1h
-  stale_after: 90s
-  memory:
-    threshold: 85
-    resolve_below: 80
-    for: 2m
-    severity: warning
-  disk:
-    threshold: 85
-    resolve_below: 80
-    for: 2m
-    severity: warning
-    predict_full_within: 4h
-    mounts:
-      - /
-      # Add any other mount points you want monitored, e.g.:
-      # - /var
-      # - /mnt/data
-  load:
-    # 1-minute load average divided by CPU cores.
-    threshold: 1.5
-    resolve_below: 1.0
-    for: 2m
-    severity: warning
-  cpu:
-    threshold: 85
-    resolve_below: 80
-    for: 2m
-    severity: warning
-  swap:
-    threshold: 80
-    resolve_below: 75
-    for: 2m
-    severity: warning
-  systemd:
-    severity: critical
-    services: []
-    # services:
-    #   - nginx
-    #   - postgresql
-  http:
-    severity: critical
-    checks: []
-    # checks:
-    #   - name: app
-    #     url: "https://example.com/health"
-    #     timeout: 5s
-    #     expected_status: 200
-  tcp:
-    severity: critical
-    checks: []
-    # checks:
-    #   - name: redis
-    #     address: "127.0.0.1:6379"
-    #     timeout: 5s
-  process:
-    severity: critical
-    names: []
-    # names:
-    #   - nginx
-    #   - postgres
-
-# Alerts fan out to every notifier you configure. Uncomment the ones you want,
-# then restart the service.
-notifiers:
-  # google_chat:
-  #   webhook_url: "https://chat.googleapis.com/v1/spaces/XXX/messages?key=...&token=..."
-  # discord:
-  #   webhook_url: "https://discord.com/api/webhooks/XXX/YYY"
-  # slack:
-  #   webhook_url: "https://hooks.slack.com/services/XXX/YYY/ZZZ"
-  # teams:
-  #   webhook_url: "https://example.webhook.office.com/..."
-  # telegram:
-  #   bot_token: "123456:ABC..."
-  #   chat_id: "987654321"
-  # pagerduty:
-  #   integration_key: "pagerduty-events-api-v2-key"
-  # webhook:
-  #   webhook_url: "https://example.com/hooks/lookout"
-  # email:
-  #   host: "smtp.example.com"
-  #   port: 587
-  #   implicit_tls: false
-  #   username: ""
-  #   password: ""
-  #   from: "lookout@example.com"
-  #   to:
-  #     - "you@example.com"
-
-# Optional dead-man's switch: lookout pings this URL on an interval; when the
-# pings stop, the external service (e.g. healthchecks.io) alerts you.
-heartbeat:
-  # url: "https://hc-ping.com/your-uuid"
-  interval: 60s
-
-docker:
-  enabled: false
-  severity: critical
-  restart_threshold: 3
-  restart_window: 10m
-EOF
-  echo "Created config template -> ${CONF_FILE}"
-else
+if [ -f "$CONF_FILE" ]; then
   echo "Kept existing config -> ${CONF_FILE}"
+elif curl -fsSL "${BASE}/config.example.yaml" -o "${TMP}/config.example.yaml"; then
+  expected_conf=$(awk '$2 == "config.example.yaml" {print $1}' "${TMP}/checksums.txt")
+  [ -n "$expected_conf" ] || fail "no checksum found for config.example.yaml"
+  actual_conf=$(sha256sum "${TMP}/config.example.yaml" | awk '{print $1}')
+  [ "$expected_conf" = "$actual_conf" ] || fail "config checksum mismatch (expected ${expected_conf}, got ${actual_conf})"
+  install -m 600 "${TMP}/config.example.yaml" "$CONF_FILE"
+  echo "Created config -> ${CONF_FILE}"
+else
+  echo "Could not download the config template; lookout will run on built-in defaults."
+  echo "Create ${CONF_FILE} later from deploy/config.example.yaml if you want to customize it."
 fi
-chmod 600 "$CONF_FILE"
-chown "${SERVICE_USER}:${SERVICE_USER}" "$CONF_FILE"
+if [ -f "$CONF_FILE" ]; then
+  chmod 600 "$CONF_FILE"
+  chown "${SERVICE_USER}:${SERVICE_USER}" "$CONF_FILE"
+fi
 
 # --- systemd unit ---
 cat > "$UNIT_FILE" <<EOF

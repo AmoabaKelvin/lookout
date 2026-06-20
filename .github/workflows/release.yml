@@ -31,4 +31,5 @@ jobs:
           files: |
             dist/lookout-linux-amd64
             dist/lookout-linux-arm64
+            dist/config.example.yaml
             dist/checksums.txt
