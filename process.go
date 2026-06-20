@@ -9,10 +9,13 @@ import (
 )
 
 func processCollector(source string, names []string) []MetricSample {
+	samples := make([]MetricSample, 0, len(names))
+	if !hasProcessChecks(names) {
+		return samples
+	}
+
 	collectedAt := time.Now()
 	running := runningProcesses(source)
-	samples := make([]MetricSample, 0, len(names))
-
 	for _, name := range names {
 		name = strings.TrimSpace(name)
 		if name == "" {
@@ -21,6 +24,15 @@ func processCollector(source string, names []string) []MetricSample {
 		samples = append(samples, stateSample("process", name, ".missing", !running[name], collectedAt))
 	}
 	return samples
+}
+
+func hasProcessChecks(names []string) bool {
+	for _, name := range names {
+		if strings.TrimSpace(name) != "" {
+			return true
+		}
+	}
+	return false
 }
 
 func runningProcesses(source string) map[string]bool {
