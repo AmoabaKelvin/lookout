@@ -75,6 +75,8 @@ alerts:
     #   - postgres
 
 # Alerts fan out to every notifier you configure. Uncomment the ones you want.
+# Each notifier takes an optional min_severity (warning or critical); the
+# default, warning, receives everything.
 notifiers:
   # google_chat:
   #   webhook_url: "https://chat.googleapis.com/v1/spaces/XXX/messages?key=...&token=..."
@@ -89,6 +91,7 @@ notifiers:
   #   chat_id: "987654321"
   # pagerduty:
   #   integration_key: "pagerduty-events-api-v2-key"
+  #   min_severity: critical    # page only on criticals
   # webhook:
   #   webhook_url: "https://example.com/hooks/lookout"
   # email:

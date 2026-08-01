@@ -189,7 +189,11 @@ PagerDuty severity used for the alert.
 
 ## Notifiers
 
-Lookout sends an alert to every notifier you configure.
+Lookout sends an alert to every notifier you configure. Set `min_severity` on a
+notifier to limit what it receives: `critical` sends only critical alerts, and
+`warning` (the default) sends everything. This lets you page only on criticals
+while warnings go to a chat channel. A resolved alert keeps its rule's
+severity, so it reaches the same channels as the alert that fired.
 
 ```yaml
 notifiers:
@@ -206,6 +210,7 @@ notifiers:
     chat_id: "987654321"
   pagerduty:
     integration_key: "pagerduty-events-api-v2-key"
+    min_severity: critical
   webhook:
     webhook_url: "https://example.com/hooks/lookout"
   email:

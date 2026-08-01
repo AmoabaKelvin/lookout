@@ -80,7 +80,7 @@ func TestAsyncNotifierPreservesOrder(t *testing.T) {
 	defer cancel()
 
 	recorder := newRecordingNotifier()
-	notifier := newAsyncNotifier([]Notifier{recorder}, 10)
+	notifier := newAsyncNotifier([]routedNotifier{{notifier: recorder}}, 10)
 	go notifier.Run(ctx)
 
 	firing := Alert{IsFiring: true, Metric: "memory.used_percent"}
@@ -109,7 +109,7 @@ func TestAsyncNotifierDoesNotBlockWhenQueueIsFull(t *testing.T) {
 	defer cancel()
 
 	blocking := newBlockingNotifier()
-	notifier := newAsyncNotifier([]Notifier{blocking}, 1)
+	notifier := newAsyncNotifier([]routedNotifier{{notifier: blocking}}, 1)
 	go notifier.Run(ctx)
 
 	if err := notifier.Send(Alert{Metric: "first"}); err != nil {
@@ -131,6 +131,83 @@ func TestAsyncNotifierDoesNotBlockWhenQueueIsFull(t *testing.T) {
 	}
 
 	close(blocking.release)
+}
+
+func TestAsyncNotifierRoutesBySeverity(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	pager := newRecordingNotifier()
+	all := newRecordingNotifier()
+	notifier := newAsyncNotifier([]routedNotifier{
+		{notifier: pager, minSeverity: SeverityCritical},
+		{notifier: all, minSeverity: SeverityWarning},
+	}, 10)
+	go notifier.Run(ctx)
+
+	alerts := []Alert{
+		{IsFiring: true, Metric: "cpu", Severity: SeverityWarning},
+		{IsFiring: true, Metric: "disk", Severity: SeverityCritical},
+		{IsFiring: false, Metric: "disk", Severity: SeverityCritical},
+		{IsFiring: false, Metric: "cpu", Severity: SeverityWarning},
+	}
+	for _, alert := range alerts {
+		if err := notifier.Send(alert); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// The dispatcher tries pager before all for each alert, so once all has
+	// received every alert, pager has already seen (or skipped) each of them.
+	for range alerts {
+		waitForSignal(t, all.sent)
+	}
+	if got := all.snapshot(); len(got) != 4 {
+		t.Fatalf("default notifier got %d alerts, want 4: %+v", len(got), got)
+	}
+
+	got := pager.snapshot()
+	if len(got) != 2 {
+		t.Fatalf("critical-only notifier got %d alerts, want 2: %+v", len(got), got)
+	}
+	if got[0].Severity != SeverityCritical || got[1].Severity != SeverityCritical {
+		t.Fatalf("critical-only notifier received non-critical alerts: %+v", got)
+	}
+	// The resolve routes to the same channel that saw the fire.
+	if !got[0].IsFiring || got[1].IsFiring {
+		t.Fatalf("expected firing then resolved critical alert, got %+v", got)
+	}
+}
+
+func TestBuildNotifiersAppliesMinSeverity(t *testing.T) {
+	notifiers, _, err := buildNotifiers(NotifiersConfig{
+		Slack:     &WebhookConfig{WebhookURL: "https://hooks.slack.com/services/X/Y/Z"},
+		PagerDuty: &PagerDutyConfig{IntegrationKey: "key", MinSeverity: SeverityCritical},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, routed := range notifiers {
+		switch routed.notifier.(type) {
+		case *SlackNotifier:
+			if routed.minSeverity != SeverityWarning {
+				t.Errorf("slack min severity = %q, want default warning", routed.minSeverity)
+			}
+		case *PagerDutyNotifier:
+			if routed.minSeverity != SeverityCritical {
+				t.Errorf("pagerduty min severity = %q, want critical", routed.minSeverity)
+			}
+		}
+	}
+}
+
+func TestBuildNotifiersRejectsInvalidMinSeverity(t *testing.T) {
+	_, _, err := buildNotifiers(NotifiersConfig{
+		Slack: &WebhookConfig{WebhookURL: "https://hooks.slack.com/services/X/Y/Z", MinSeverity: "urgent"},
+	})
+	if err == nil || !strings.Contains(err.Error(), "notifiers.slack.min_severity") {
+		t.Fatalf("expected min_severity validation error, got %v", err)
+	}
 }
 
 func TestBuildNotifiersValidatesAndReturnsActiveNames(t *testing.T) {
@@ -168,9 +245,9 @@ func TestBuildNotifiersValidatesAndReturnsActiveNames(t *testing.T) {
 	}
 }
 
-func findSMTPNotifier(notifiers []Notifier) *SMTPNotifier {
-	for _, notifier := range notifiers {
-		if smtpNotifier, ok := notifier.(*SMTPNotifier); ok {
+func findSMTPNotifier(notifiers []routedNotifier) *SMTPNotifier {
+	for _, routed := range notifiers {
+		if smtpNotifier, ok := routed.notifier.(*SMTPNotifier); ok {
 			return smtpNotifier
 		}
 	}

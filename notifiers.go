@@ -20,12 +20,28 @@ type Notifier interface {
 
 var errNotifierQueueFull = errors.New("notifier queue is full")
 
-type asyncNotifier struct {
-	queue     chan Alert
-	notifiers []Notifier
+// routedNotifier pairs a notifier with the minimum severity it accepts, so a
+// paging channel can receive only criticals while others receive everything.
+type routedNotifier struct {
+	notifier    Notifier
+	minSeverity Severity
 }
 
-func newAsyncNotifier(notifiers []Notifier, capacity int) *asyncNotifier {
+// accepts filters on severity alone, never on firing state: a rule's severity
+// is stable, so a fire and its later resolve always route to the same channels.
+func (r routedNotifier) accepts(s Severity) bool {
+	if r.minSeverity == SeverityCritical {
+		return s == SeverityCritical
+	}
+	return true
+}
+
+type asyncNotifier struct {
+	queue     chan Alert
+	notifiers []routedNotifier
+}
+
+func newAsyncNotifier(notifiers []routedNotifier, capacity int) *asyncNotifier {
 	if capacity < 1 {
 		capacity = 1
 	}
@@ -56,8 +72,11 @@ func (n *asyncNotifier) Run(ctx context.Context) {
 }
 
 func (n *asyncNotifier) send(alert Alert) {
-	for _, notifier := range n.notifiers {
-		if err := notifier.Send(alert); err != nil {
+	for _, routed := range n.notifiers {
+		if !routed.accepts(alert.Severity) {
+			continue
+		}
+		if err := routed.notifier.Send(alert); err != nil {
 			log.Printf("error sending alert: %v", err)
 		}
 	}
