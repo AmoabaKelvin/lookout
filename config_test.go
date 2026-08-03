@@ -151,6 +151,7 @@ notifiers:
     webhook_url: "https://example.webhook.office.com/team"
   pagerduty:
     integration_key: "pagerduty-key"
+    min_severity: critical
 heartbeat:
   url: "https://hc-ping.com/abc"
   interval: 45s
@@ -243,6 +244,12 @@ metrics:
 	}
 	if cfg.Notifiers.PagerDuty == nil || cfg.Notifiers.PagerDuty.IntegrationKey != "pagerduty-key" {
 		t.Errorf("pagerduty notifier not parsed: %+v", cfg.Notifiers.PagerDuty)
+	}
+	if cfg.Notifiers.PagerDuty != nil && cfg.Notifiers.PagerDuty.MinSeverity != SeverityCritical {
+		t.Errorf("pagerduty min_severity not parsed: %+v", cfg.Notifiers.PagerDuty)
+	}
+	if cfg.Notifiers.Slack != nil && cfg.Notifiers.Slack.MinSeverity != "" {
+		t.Errorf("slack min_severity should default to empty, got %q", cfg.Notifiers.Slack.MinSeverity)
 	}
 	if cfg.Notifiers.Discord != nil {
 		t.Errorf("absent notifier should be nil, got %+v", cfg.Notifiers.Discord)

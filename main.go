@@ -130,14 +130,14 @@ func main() {
 
 // initNotifiers builds the configured notifiers, falling back to console output
 // when none are set, and reports which channels are active.
-func initNotifiers(cfg NotifiersConfig) ([]Notifier, error) {
+func initNotifiers(cfg NotifiersConfig) ([]routedNotifier, error) {
 	notifiers, active, err := buildNotifiers(cfg)
 	if err != nil {
 		return nil, err
 	}
 	if len(notifiers) == 0 {
 		fmt.Println("No notifier configured; alerts will print to the console")
-		return []Notifier{&ConsoleNotifier{}}, nil
+		return []routedNotifier{{notifier: &ConsoleNotifier{}, minSeverity: SeverityWarning}}, nil
 	}
 	fmt.Printf("Active notifiers: %s\n", strings.Join(active, ", "))
 	return notifiers, nil
@@ -539,46 +539,62 @@ func checkFamilies(cfg Config) []checkFamily {
 	}
 }
 
-// buildNotifiers maps configured notifier sections to live notifiers. A nil
-// section is absent; a present but incomplete section is a startup error.
-func buildNotifiers(cfg NotifiersConfig) ([]Notifier, []string, error) {
-	var notifiers []Notifier
+// buildNotifiers maps configured notifier sections to live notifiers paired
+// with their severity filter. A nil section is absent; a present but incomplete
+// section is a startup error.
+func buildNotifiers(cfg NotifiersConfig) ([]routedNotifier, []string, error) {
+	var notifiers []routedNotifier
 	var active []string
+
+	add := func(name string, minSeverity Severity, n Notifier) error {
+		minSev, err := validateMinSeverity(name, minSeverity)
+		if err != nil {
+			return err
+		}
+		notifiers = append(notifiers, routedNotifier{notifier: n, minSeverity: minSev})
+		active = append(active, name)
+		return nil
+	}
 
 	if n := cfg.GoogleChat; n != nil {
 		if err := validateWebhookURL("notifiers.google_chat.webhook_url", n.WebhookURL); err != nil {
 			return nil, nil, err
 		}
-		notifiers = append(notifiers, &GoogleChatNotifier{WebhookURL: n.WebhookURL})
-		active = append(active, "google_chat")
+		if err := add("google_chat", n.MinSeverity, &GoogleChatNotifier{WebhookURL: n.WebhookURL}); err != nil {
+			return nil, nil, err
+		}
 	}
 	if n := cfg.Discord; n != nil {
 		if err := validateWebhookURL("notifiers.discord.webhook_url", n.WebhookURL); err != nil {
 			return nil, nil, err
 		}
-		notifiers = append(notifiers, &DiscordNotifier{WebhookURL: n.WebhookURL})
-		active = append(active, "discord")
+		if err := add("discord", n.MinSeverity, &DiscordNotifier{WebhookURL: n.WebhookURL}); err != nil {
+			return nil, nil, err
+		}
 	}
 	if n := cfg.Slack; n != nil {
 		if err := validateWebhookURL("notifiers.slack.webhook_url", n.WebhookURL); err != nil {
 			return nil, nil, err
 		}
-		notifiers = append(notifiers, &SlackNotifier{WebhookURL: n.WebhookURL})
-		active = append(active, "slack")
+		if err := add("slack", n.MinSeverity, &SlackNotifier{WebhookURL: n.WebhookURL}); err != nil {
+			return nil, nil, err
+		}
 	}
 	if n := cfg.Teams; n != nil {
 		if err := validateWebhookURL("notifiers.teams.webhook_url", n.WebhookURL); err != nil {
 			return nil, nil, err
 		}
-		notifiers = append(notifiers, &TeamsNotifier{WebhookURL: n.WebhookURL})
-		active = append(active, "teams")
+		if err := add("teams", n.MinSeverity, &TeamsNotifier{WebhookURL: n.WebhookURL}); err != nil {
+			return nil, nil, err
+		}
 	}
 	if n := cfg.Webhook; n != nil {
 		if err := validateWebhookURL("notifiers.webhook.webhook_url", n.WebhookURL); err != nil {
 			return nil, nil, err
 		}
-		notifiers = append(notifiers, &GenericWebhookNotifier{WebhookURL: n.WebhookURL})
-		active = append(active, "webhook")
+		if err := add("webhook", n.MinSeverity, &GenericWebhookNotifier{WebhookURL: n.WebhookURL}); err != nil {
+			return nil, nil, err
+		}
 	}
 	if n := cfg.Telegram; n != nil {
 		if n.BotToken == "" {
@@ -587,28 +603,45 @@ func buildNotifiers(cfg NotifiersConfig) ([]Notifier, []string, error) {
 		if n.ChatID == "" {
 			return nil, nil, fmt.Errorf("notifiers.telegram.chat_id is required")
 		}
-		notifiers = append(notifiers, &TelegramNotifier{BotToken: n.BotToken, ChatID: n.ChatID})
-		active = append(active, "telegram")
+		if err := add("telegram", n.MinSeverity, &TelegramNotifier{BotToken: n.BotToken, ChatID: n.ChatID}); err != nil {
+			return nil, nil, err
+		}
 	}
 	if n := cfg.PagerDuty; n != nil {
 		if n.IntegrationKey == "" {
 			return nil, nil, fmt.Errorf("notifiers.pagerduty.integration_key is required")
 		}
-		notifiers = append(notifiers, &PagerDutyNotifier{IntegrationKey: n.IntegrationKey})
-		active = append(active, "pagerduty")
+		if err := add("pagerduty", n.MinSeverity, &PagerDutyNotifier{IntegrationKey: n.IntegrationKey}); err != nil {
+			return nil, nil, err
+		}
 	}
 	if n := cfg.Email; n != nil {
 		if err := validateEmailNotifier(n); err != nil {
 			return nil, nil, err
 		}
-		notifiers = append(notifiers, &SMTPNotifier{
+		smtp := &SMTPNotifier{
 			Host: n.Host, Port: n.Port, ImplicitTLS: n.ImplicitTLS,
 			Username: n.Username, Password: n.Password,
 			From: n.From, To: n.To,
-		})
-		active = append(active, "email")
+		}
+		if err := add("email", n.MinSeverity, smtp); err != nil {
+			return nil, nil, err
+		}
 	}
 	return notifiers, active, nil
+}
+
+// validateMinSeverity resolves a notifier's optional min_severity: absent means
+// accept everything (warning and up); anything else must be a known severity.
+func validateMinSeverity(name string, s Severity) (Severity, error) {
+	switch s {
+	case "":
+		return SeverityWarning, nil
+	case SeverityWarning, SeverityCritical:
+		return s, nil
+	default:
+		return "", fmt.Errorf("notifiers.%s.min_severity must be warning or critical", name)
+	}
 }
 
 func validateWebhookURL(name string, raw string) error {

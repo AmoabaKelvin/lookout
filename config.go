@@ -141,16 +141,19 @@ type NotifiersConfig struct {
 }
 
 type WebhookConfig struct {
-	WebhookURL string `yaml:"webhook_url"`
+	WebhookURL  string   `yaml:"webhook_url"`
+	MinSeverity Severity `yaml:"min_severity"`
 }
 
 type TelegramConfig struct {
-	BotToken string `yaml:"bot_token"`
-	ChatID   string `yaml:"chat_id"`
+	BotToken    string   `yaml:"bot_token"`
+	ChatID      string   `yaml:"chat_id"`
+	MinSeverity Severity `yaml:"min_severity"`
 }
 
 type PagerDutyConfig struct {
-	IntegrationKey string `yaml:"integration_key"`
+	IntegrationKey string   `yaml:"integration_key"`
+	MinSeverity    Severity `yaml:"min_severity"`
 }
 
 type EmailConfig struct {
@@ -161,6 +164,7 @@ type EmailConfig struct {
 	Password    string   `yaml:"password"`
 	From        string   `yaml:"from"`
 	To          []string `yaml:"to"`
+	MinSeverity Severity `yaml:"min_severity"`
 }
 
 type HeartbeatConfig struct {
