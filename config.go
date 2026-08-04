@@ -51,6 +51,7 @@ type AlertsConfig struct {
 	Load          LoadAlertConfig `yaml:"load"`
 	CPU           CPUConfig       `yaml:"cpu"`
 	Swap          SwapConfig      `yaml:"swap"`
+	Pressure      PressureConfig  `yaml:"pressure"`
 	Systemd       SystemdConfig   `yaml:"systemd"`
 	HTTP          HTTPConfig      `yaml:"http"`
 	TCP           TCPConfig       `yaml:"tcp"`
@@ -88,6 +89,20 @@ type CPUConfig struct {
 }
 
 type SwapConfig struct {
+	Threshold    float64  `yaml:"threshold"`
+	ResolveBelow *float64 `yaml:"resolve_below"`
+	For          Duration `yaml:"for"`
+	Severity     Severity `yaml:"severity"`
+}
+
+type PressureConfig struct {
+	Enabled bool                `yaml:"enabled"`
+	CPU     PressureAlertConfig `yaml:"cpu"`
+	Memory  PressureAlertConfig `yaml:"memory"`
+	IO      PressureAlertConfig `yaml:"io"`
+}
+
+type PressureAlertConfig struct {
 	Threshold    float64  `yaml:"threshold"`
 	ResolveBelow *float64 `yaml:"resolve_below"`
 	For          Duration `yaml:"for"`
@@ -217,6 +232,24 @@ func defaultConfig() Config {
 				For:       Duration(2 * time.Minute),
 				Severity:  SeverityWarning,
 			},
+			Pressure: PressureConfig{
+				Enabled: false,
+				CPU: PressureAlertConfig{
+					Threshold: 20,
+					For:       Duration(2 * time.Minute),
+					Severity:  SeverityWarning,
+				},
+				Memory: PressureAlertConfig{
+					Threshold: 5,
+					For:       Duration(time.Minute),
+					Severity:  SeverityCritical,
+				},
+				IO: PressureAlertConfig{
+					Threshold: 10,
+					For:       Duration(2 * time.Minute),
+					Severity:  SeverityWarning,
+				},
+			},
 			Systemd: SystemdConfig{Severity: SeverityCritical},
 			HTTP:    HTTPConfig{Severity: SeverityCritical},
 			TCP:     TCPConfig{Severity: SeverityCritical},
@@ -279,11 +312,17 @@ func (c *Config) validate() {
 	clampThreshold(&c.Alerts.Disk.Threshold, "alerts.disk.threshold")
 	clampThreshold(&c.Alerts.CPU.Threshold, "alerts.cpu.threshold")
 	clampThreshold(&c.Alerts.Swap.Threshold, "alerts.swap.threshold")
+	clampThreshold(&c.Alerts.Pressure.CPU.Threshold, "alerts.pressure.cpu.threshold")
+	clampThreshold(&c.Alerts.Pressure.Memory.Threshold, "alerts.pressure.memory.threshold")
+	clampThreshold(&c.Alerts.Pressure.IO.Threshold, "alerts.pressure.io.threshold")
 	clampPositiveFloat(&c.Alerts.Load.Threshold, 1.5, "alerts.load.threshold")
 	c.Alerts.Memory.ResolveBelow = normalizedResolveBelow(c.Alerts.Memory.ResolveBelow, c.Alerts.Memory.Threshold, 5, "alerts.memory.resolve_below")
 	c.Alerts.Disk.ResolveBelow = normalizedResolveBelow(c.Alerts.Disk.ResolveBelow, c.Alerts.Disk.Threshold, 5, "alerts.disk.resolve_below")
 	c.Alerts.CPU.ResolveBelow = normalizedResolveBelow(c.Alerts.CPU.ResolveBelow, c.Alerts.CPU.Threshold, 5, "alerts.cpu.resolve_below")
 	c.Alerts.Swap.ResolveBelow = normalizedResolveBelow(c.Alerts.Swap.ResolveBelow, c.Alerts.Swap.Threshold, 5, "alerts.swap.resolve_below")
+	c.Alerts.Pressure.CPU.ResolveBelow = normalizedResolveBelow(c.Alerts.Pressure.CPU.ResolveBelow, c.Alerts.Pressure.CPU.Threshold, 5, "alerts.pressure.cpu.resolve_below")
+	c.Alerts.Pressure.Memory.ResolveBelow = normalizedResolveBelow(c.Alerts.Pressure.Memory.ResolveBelow, c.Alerts.Pressure.Memory.Threshold, 2, "alerts.pressure.memory.resolve_below")
+	c.Alerts.Pressure.IO.ResolveBelow = normalizedResolveBelow(c.Alerts.Pressure.IO.ResolveBelow, c.Alerts.Pressure.IO.Threshold, 5, "alerts.pressure.io.resolve_below")
 	c.Alerts.Load.ResolveBelow = normalizedResolveBelow(c.Alerts.Load.ResolveBelow, c.Alerts.Load.Threshold, 0.5, "alerts.load.resolve_below")
 
 	clampFor(&c.Alerts.Memory.For, "alerts.memory.for")
@@ -292,12 +331,18 @@ func (c *Config) validate() {
 	clampFor(&c.Alerts.Load.For, "alerts.load.for")
 	clampFor(&c.Alerts.CPU.For, "alerts.cpu.for")
 	clampFor(&c.Alerts.Swap.For, "alerts.swap.for")
+	clampFor(&c.Alerts.Pressure.CPU.For, "alerts.pressure.cpu.for")
+	clampFor(&c.Alerts.Pressure.Memory.For, "alerts.pressure.memory.for")
+	clampFor(&c.Alerts.Pressure.IO.For, "alerts.pressure.io.for")
 
 	clampSeverity(&c.Alerts.Memory.Severity, SeverityWarning, "alerts.memory.severity")
 	clampSeverity(&c.Alerts.Disk.Severity, SeverityWarning, "alerts.disk.severity")
 	clampSeverity(&c.Alerts.Load.Severity, SeverityWarning, "alerts.load.severity")
 	clampSeverity(&c.Alerts.CPU.Severity, SeverityWarning, "alerts.cpu.severity")
 	clampSeverity(&c.Alerts.Swap.Severity, SeverityWarning, "alerts.swap.severity")
+	clampSeverity(&c.Alerts.Pressure.CPU.Severity, SeverityWarning, "alerts.pressure.cpu.severity")
+	clampSeverity(&c.Alerts.Pressure.Memory.Severity, SeverityCritical, "alerts.pressure.memory.severity")
+	clampSeverity(&c.Alerts.Pressure.IO.Severity, SeverityWarning, "alerts.pressure.io.severity")
 	clampSeverity(&c.Alerts.Systemd.Severity, SeverityCritical, "alerts.systemd.severity")
 	clampSeverity(&c.Alerts.HTTP.Severity, SeverityCritical, "alerts.http.severity")
 	clampSeverity(&c.Alerts.TCP.Severity, SeverityCritical, "alerts.tcp.severity")

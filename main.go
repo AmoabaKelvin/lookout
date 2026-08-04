@@ -25,11 +25,12 @@ const notifierQueueSize = 100
 // each collector parses a kernel-specific format, so the path can only be the
 // real one. The collectors still take a path argument so tests can pass fixtures.
 const (
-	procMeminfo = "/proc/meminfo"
-	procMounts  = "/proc/mounts"
-	procLoadavg = "/proc/loadavg"
-	procStat    = "/proc/stat"
-	procDir     = "/proc"
+	procMeminfo  = "/proc/meminfo"
+	procMounts   = "/proc/mounts"
+	procLoadavg  = "/proc/loadavg"
+	procStat     = "/proc/stat"
+	procPressure = "/proc/pressure"
+	procDir      = "/proc"
 )
 
 type evaluatorEvent struct {
@@ -45,6 +46,10 @@ func main() {
 	cfg, err := LoadConfig(*configPath)
 	if err != nil {
 		log.Fatalf("config: %v", err)
+	}
+	pressure, err := configuredPressureCollector(cfg, procPressure)
+	if err != nil {
+		log.Fatalf("pressure: %v", err)
 	}
 
 	// shut down cleanly on SIGINT/SIGTERM (systemd stops the service with SIGTERM)
@@ -111,7 +116,7 @@ func main() {
 		go dockerCollector(ctx, cli, dockerEvents)
 	}
 
-	collector := newMetricCollector(cfg, metricSnapshot, evaluatorEvents)
+	collector := newMetricCollector(cfg, metricSnapshot, evaluatorEvents, pressure)
 
 	ticker := time.NewTicker(cfg.CollectionInterval.Std())
 	defer ticker.Stop()
@@ -145,22 +150,41 @@ func initNotifiers(cfg NotifiersConfig) ([]routedNotifier, error) {
 
 // metricCollector runs one full collection pass per tick: it gathers each
 // collector's samples, publishes them to the snapshot and the evaluator, and
-// threads the per-run state (previous CPU times, disk-fill history) between runs.
+// threads previous CPU/PSI totals and disk-fill history between runs.
 type metricCollector struct {
 	cfg           Config
 	snapshot      *metricsSnapshot
 	events        chan<- evaluatorEvent
 	cpuPrevious   *cpuTimes
+	pressure      *pressureCollector
 	diskPredictor *diskFillPredictor
 }
 
-func newMetricCollector(cfg Config, snapshot *metricsSnapshot, events chan<- evaluatorEvent) *metricCollector {
+func newMetricCollector(cfg Config, snapshot *metricsSnapshot, events chan<- evaluatorEvent, pressure *pressureCollector) *metricCollector {
 	return &metricCollector{
 		cfg:           cfg,
 		snapshot:      snapshot,
 		events:        events,
+		pressure:      pressure,
 		diskPredictor: newDiskFillPredictor(),
 	}
+}
+
+func configuredPressureCollector(cfg Config, dir string) (*pressureCollector, error) {
+	if !cfg.Alerts.Pressure.Enabled && !cfg.Metrics.Enabled {
+		return nil, nil
+	}
+
+	collector, err := newPressureCollector(dir)
+	if err == nil {
+		return collector, nil
+	}
+	if cfg.Alerts.Pressure.Enabled {
+		return nil, fmt.Errorf("alerts are enabled but PSI is unavailable; require readable cpu, memory, and io files under %s (Linux 4.20+ with CONFIG_PSI enabled, and psi=1 where required): %w", dir, err)
+	}
+
+	log.Printf("metrics: PSI pressure metrics unavailable: %v", err)
+	return nil, nil
 }
 
 func (c *metricCollector) publish(samples []MetricSample) {
@@ -193,7 +217,12 @@ func (c *metricCollector) collectOnce() {
 	loadData, err := loadCollector(procLoadavg, runtime.NumCPU())
 	c.emit("load", loadData, err)
 
-	// CPU is the one collector that threads state (cpuPrevious) between runs.
+	if c.pressure != nil {
+		pressureData, err := c.pressure.Collect()
+		c.emit("pressure", pressureData, err)
+	}
+
+	// CPU usage, like PSI interval pressure, is derived from cumulative deltas.
 	cpuData, nextCPU, err := cpuCollector(procStat, c.cpuPrevious)
 	if err != nil {
 		fmt.Printf("Error collecting cpu info: %v\n", err)
@@ -396,6 +425,48 @@ func buildRuleSpecs(cfg Config) []ruleSpec {
 			},
 			tracked: diskMetricNames(cfg, ".fills_within_window"),
 		})
+	}
+
+	if cfg.Alerts.Pressure.Enabled {
+		for _, pressureRule := range []struct {
+			id         string
+			metricName string
+			message    string
+			config     PressureAlertConfig
+		}{
+			{
+				id:         "pressure-cpu",
+				metricName: "pressure.cpu.some.stall_percent",
+				message:    "CPU contention pressure",
+				config:     cfg.Alerts.Pressure.CPU,
+			},
+			{
+				id:         "pressure-memory",
+				metricName: "pressure.memory.full.stall_percent",
+				message:    "Full memory pressure",
+				config:     cfg.Alerts.Pressure.Memory,
+			},
+			{
+				id:         "pressure-io",
+				metricName: "pressure.io.full.stall_percent",
+				message:    "Full I/O pressure",
+				config:     cfg.Alerts.Pressure.IO,
+			},
+		} {
+			metricName := pressureRule.metricName
+			specs = append(specs, ruleSpec{
+				rule: Rule{
+					ID:           pressureRule.id,
+					Matcher:      func(s MetricSample) bool { return s.Name == metricName },
+					Threshold:    pressureRule.config.Threshold,
+					ResolveBelow: *pressureRule.config.ResolveBelow,
+					Message:      pressureRule.message,
+					Severity:     pressureRule.config.Severity,
+					For:          pressureRule.config.For.Std(),
+				},
+				tracked: []string{metricName},
+			})
+		}
 	}
 
 	for _, family := range checkFamilies(cfg) {

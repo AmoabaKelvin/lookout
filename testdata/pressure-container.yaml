@@ -1,0 +1,55 @@
+collection_interval: 5s
+state_file: /tmp/lookout-state.json
+
+metrics:
+  enabled: true
+  listen: "0.0.0.0:9100"
+
+alerts:
+  renotify_after: 1h
+  stale_after: 30s
+  memory:
+    threshold: 100
+    resolve_below: 100
+    for: 0s
+    severity: warning
+  disk:
+    threshold: 100
+    resolve_below: 100
+    for: 0s
+    severity: warning
+    predict_full_within: 0s
+    mounts:
+      - /
+  load:
+    threshold: 100
+    resolve_below: 99
+    for: 0s
+    severity: warning
+  cpu:
+    threshold: 100
+    resolve_below: 100
+    for: 0s
+    severity: warning
+  swap:
+    threshold: 100
+    resolve_below: 100
+    for: 0s
+    severity: warning
+  pressure:
+    enabled: true
+    cpu:
+      threshold: 5
+      resolve_below: 1
+      for: 0s
+      severity: warning
+    memory:
+      threshold: 5
+      resolve_below: 1
+      for: 0s
+      severity: critical
+    io:
+      threshold: 5
+      resolve_below: 1
+      for: 0s
+      severity: warning

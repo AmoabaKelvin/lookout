@@ -19,6 +19,7 @@ Lookout collects from the local machine and evaluates alerts in-process.
 | Disk growth | Whether a disk is on pace to fill within a configured window |
 | Load | 1-minute load average divided by CPU cores |
 | CPU | CPU usage percentage from `/proc/stat` |
+| Resource pressure | CPU contention and full memory/I/O stalls from Linux PSI |
 | systemd | Whether named services are active |
 | HTTP | Whether configured URLs return the expected status code |
 | TCP | Whether configured TCP addresses accept a connection |
@@ -106,6 +107,24 @@ alerts:
     resolve_below: 80
     for: 2m
     severity: warning
+  pressure:
+    # Requires Linux PSI. Kept opt-in while thresholds are evaluated on real workloads.
+    enabled: false
+    cpu:
+      threshold: 20
+      resolve_below: 15
+      for: 2m
+      severity: warning
+    memory:
+      threshold: 5
+      resolve_below: 3
+      for: 1m
+      severity: critical
+    io:
+      threshold: 10
+      resolve_below: 5
+      for: 2m
+      severity: warning
   swap:
     threshold: 80
     resolve_below: 75
@@ -166,6 +185,36 @@ Lookout sends the first alert. Set it to `0s` if you want immediate alerts.
 three times the collection interval.
 
 Durations use Go-style strings such as `5s`, `2m`, and `1h`.
+
+### Pressure Stall Information
+
+Linux Pressure Stall Information (PSI) measures time in which work cannot make
+progress because CPU, memory, or I/O is contended. This complements utilization:
+a CPU can be fully utilized without delaying work, while memory reclaim can
+stall an application even when host-wide `MemAvailable` still looks healthy.
+
+Pressure alerts are opt-in. They require readable `cpu`, `memory`, and `io`
+files under `/proc/pressure` (normally Linux 4.20 or newer with `CONFIG_PSI`
+enabled; some systems also require the `psi=1` kernel command-line option).
+Lookout refuses to start if pressure alerts are enabled but those signals are
+unavailable, rather than silently leaving the alerts inactive.
+
+The configured thresholds are percentages of wall time lost between Lookout
+collection passes:
+
+- `cpu` uses PSI `some`: at least one runnable task was waiting for CPU time.
+- `memory` uses PSI `full`: all non-idle work was stalled on memory.
+- `io` uses PSI `full`: all non-idle work was stalled on I/O.
+
+Lookout also exports the `some` and `full` kernel averages over 10, 60, and 300
+seconds when the Prometheus endpoint is enabled. System-wide CPU `full` is not
+used because the kernel defines it as unavailable and reports it as zero.
+
+The example thresholds are starting points, not universal limits. Enable PSI on
+one server first and compare pressure against application latency and throughput
+before rolling the alert thresholds out broadly. A reproducible CPU and memory
+disagreement study is described in
+[`docs/psi-evaluation.md`](docs/psi-evaluation.md).
 
 ### Prometheus metrics
 

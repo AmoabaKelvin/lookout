@@ -12,6 +12,7 @@ func TestMetricsSnapshotRendersPrometheusText(t *testing.T) {
 	snapshot := newMetricsSnapshot("web-1", "v1.2.3")
 	snapshot.Update([]MetricSample{
 		{Name: "memory.used_percent", Value: 73.4, Timestamp: time.Unix(1700000000, 123000000), Collector: "memory"},
+		{Name: "pressure.memory.full.stall_percent", Value: 4.5, Timestamp: time.Unix(1700000000, 500000000), Collector: "pressure"},
 		{Name: "disk.root.used_percent", Value: 61.2, Timestamp: time.Unix(1700000001, 0), Collector: "disk"},
 		{Name: "systemd.nginx.unhealthy", Value: 1, Timestamp: time.Unix(1700000002, 0), Collector: "systemd"},
 	})
@@ -27,6 +28,8 @@ func TestMetricsSnapshotRendersPrometheusText(t *testing.T) {
 		"disk_used_percent{host=\"web-1\",mount=\"root\"} 61.2 1700000001000\n",
 		"# TYPE memory_used_percent gauge\n",
 		"memory_used_percent{host=\"web-1\"} 73.4 1700000000123\n",
+		"# TYPE pressure_memory_full_stall_percent gauge\n",
+		"pressure_memory_full_stall_percent{host=\"web-1\"} 4.5 1700000000500\n",
 		"# TYPE systemd_unhealthy gauge\n",
 		"systemd_unhealthy{host=\"web-1\",name=\"nginx\"} 1 1700000002000\n",
 	} {

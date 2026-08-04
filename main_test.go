@@ -106,3 +106,41 @@ func TestDiskFillRulesOmittedWhenPredictionDisabled(t *testing.T) {
 		}
 	}
 }
+
+func TestPressureRulesAreOptInAndTrackExpectedSignals(t *testing.T) {
+	cfg := richConfig()
+	for _, rule := range buildRules(cfg) {
+		if strings.HasPrefix(rule.ID, "pressure-") {
+			t.Fatalf("pressure rule %q present while pressure alerts are disabled", rule.ID)
+		}
+	}
+
+	cfg.Alerts.Pressure.Enabled = true
+	want := map[string]string{
+		"pressure.cpu.some.stall_percent":    "pressure-cpu",
+		"pressure.memory.full.stall_percent": "pressure-memory",
+		"pressure.io.full.stall_percent":     "pressure-io",
+	}
+	got := make(map[string]string)
+	rules := make(map[string]Rule)
+	for _, rule := range buildRules(cfg) {
+		rules[rule.ID] = rule
+	}
+	for _, tracked := range trackedMetrics(cfg) {
+		if strings.HasPrefix(tracked.RuleID, "pressure-") {
+			got[tracked.Name] = tracked.RuleID
+		}
+	}
+	if len(got) != len(want) {
+		t.Fatalf("pressure tracked metrics = %v, want %v", got, want)
+	}
+	for metricName, ruleID := range want {
+		if got[metricName] != ruleID {
+			t.Errorf("pressure metric %q: got rule %q, want %q", metricName, got[metricName], ruleID)
+		}
+		rule, ok := rules[ruleID]
+		if !ok || !rule.Matcher(sampleFor(metricName)) {
+			t.Errorf("pressure rule %q does not match %q", ruleID, metricName)
+		}
+	}
+}
