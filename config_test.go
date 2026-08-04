@@ -64,6 +64,15 @@ func TestLoadConfigDefaults(t *testing.T) {
 	if cfg.Alerts.Swap.ResolveBelow == nil || *cfg.Alerts.Swap.ResolveBelow != 75 {
 		t.Errorf("swap resolve below: got %v", cfg.Alerts.Swap.ResolveBelow)
 	}
+	if cfg.Alerts.Pressure.Enabled {
+		t.Error("pressure alerts should be opt-in by default")
+	}
+	if cfg.Alerts.Pressure.CPU.Threshold != 20 || cfg.Alerts.Pressure.CPU.ResolveBelow == nil || *cfg.Alerts.Pressure.CPU.ResolveBelow != 15 {
+		t.Errorf("pressure CPU defaults: %+v", cfg.Alerts.Pressure.CPU)
+	}
+	if cfg.Alerts.Pressure.Memory.Threshold != 5 || cfg.Alerts.Pressure.Memory.Severity != SeverityCritical {
+		t.Errorf("pressure memory defaults: %+v", cfg.Alerts.Pressure.Memory)
+	}
 	if cfg.Alerts.Systemd.Severity != SeverityCritical {
 		t.Errorf("systemd severity: got %s", cfg.Alerts.Systemd.Severity)
 	}
@@ -123,6 +132,23 @@ alerts:
     resolve_below: 50
     for: 1m
     severity: critical
+  pressure:
+    enabled: true
+    cpu:
+      threshold: 30
+      resolve_below: 20
+      for: 3m
+      severity: critical
+    memory:
+      threshold: 8
+      resolve_below: 2
+      for: 30s
+      severity: warning
+    io:
+      threshold: 15
+      resolve_below: 5
+      for: 4m
+      severity: critical
   systemd:
     services:
       - nginx
@@ -224,6 +250,15 @@ metrics:
 	if cfg.Alerts.Swap.Severity != SeverityCritical {
 		t.Errorf("swap severity override: got %s", cfg.Alerts.Swap.Severity)
 	}
+	if !cfg.Alerts.Pressure.Enabled || cfg.Alerts.Pressure.CPU.Threshold != 30 || cfg.Alerts.Pressure.CPU.For.Std() != 3*time.Minute {
+		t.Errorf("pressure CPU overrides not applied: %+v", cfg.Alerts.Pressure)
+	}
+	if cfg.Alerts.Pressure.Memory.ResolveBelow == nil || *cfg.Alerts.Pressure.Memory.ResolveBelow != 2 || cfg.Alerts.Pressure.Memory.Severity != SeverityWarning {
+		t.Errorf("pressure memory overrides not applied: %+v", cfg.Alerts.Pressure.Memory)
+	}
+	if cfg.Alerts.Pressure.IO.ResolveBelow == nil || *cfg.Alerts.Pressure.IO.ResolveBelow != 5 || cfg.Alerts.Pressure.IO.Severity != SeverityCritical {
+		t.Errorf("pressure IO overrides not applied: %+v", cfg.Alerts.Pressure.IO)
+	}
 	if len(cfg.Alerts.Systemd.Services) != 1 || cfg.Alerts.Systemd.Services[0] != "nginx" || cfg.Alerts.Systemd.Severity != SeverityWarning {
 		t.Errorf("systemd overrides not applied: %+v", cfg.Alerts.Systemd)
 	}
@@ -319,6 +354,16 @@ alerts:
   swap:
     threshold: 250
     severity: bogus
+  pressure:
+    cpu:
+      threshold: 250
+      severity: bogus
+    memory:
+      threshold: -1
+      severity: bogus
+    io:
+      threshold: 250
+      severity: bogus
   systemd:
     severity: bogus
   http:
@@ -368,6 +413,15 @@ docker:
 	if cfg.Alerts.Swap.Severity != SeverityWarning {
 		t.Errorf("invalid swap severity should fall back, got %s", cfg.Alerts.Swap.Severity)
 	}
+	if cfg.Alerts.Pressure.CPU.Threshold != 100 || cfg.Alerts.Pressure.CPU.Severity != SeverityWarning {
+		t.Errorf("invalid pressure CPU config should clamp, got %+v", cfg.Alerts.Pressure.CPU)
+	}
+	if cfg.Alerts.Pressure.Memory.Threshold != 0 || cfg.Alerts.Pressure.Memory.Severity != SeverityCritical {
+		t.Errorf("invalid pressure memory config should clamp, got %+v", cfg.Alerts.Pressure.Memory)
+	}
+	if cfg.Alerts.Pressure.IO.Threshold != 100 || cfg.Alerts.Pressure.IO.Severity != SeverityWarning {
+		t.Errorf("invalid pressure IO config should clamp, got %+v", cfg.Alerts.Pressure.IO)
+	}
 	if cfg.Alerts.Systemd.Severity != SeverityCritical {
 		t.Errorf("invalid systemd severity should fall back, got %s", cfg.Alerts.Systemd.Severity)
 	}
@@ -408,6 +462,13 @@ alerts:
     threshold: 70
   swap:
     threshold: 40
+  pressure:
+    cpu:
+      threshold: 30
+    memory:
+      threshold: 1
+    io:
+      threshold: 12
 `))
 	if err != nil {
 		t.Fatal(err)
@@ -427,6 +488,15 @@ alerts:
 	if cfg.Alerts.Swap.ResolveBelow == nil || *cfg.Alerts.Swap.ResolveBelow != 35 {
 		t.Errorf("missing swap resolve_below should default to threshold-5, got %v", cfg.Alerts.Swap.ResolveBelow)
 	}
+	if cfg.Alerts.Pressure.CPU.ResolveBelow == nil || *cfg.Alerts.Pressure.CPU.ResolveBelow != 25 {
+		t.Errorf("missing pressure CPU resolve_below should default to threshold-5, got %v", cfg.Alerts.Pressure.CPU.ResolveBelow)
+	}
+	if cfg.Alerts.Pressure.Memory.ResolveBelow == nil || *cfg.Alerts.Pressure.Memory.ResolveBelow != 0 {
+		t.Errorf("missing pressure memory resolve_below should clamp at zero, got %v", cfg.Alerts.Pressure.Memory.ResolveBelow)
+	}
+	if cfg.Alerts.Pressure.IO.ResolveBelow == nil || *cfg.Alerts.Pressure.IO.ResolveBelow != 7 {
+		t.Errorf("missing pressure IO resolve_below should default to threshold-5, got %v", cfg.Alerts.Pressure.IO.ResolveBelow)
+	}
 }
 
 // TestExampleConfigParses guards against drift between the shipped example
@@ -441,6 +511,16 @@ func TestExampleConfigParses(t *testing.T) {
 	}
 	if len(cfg.Alerts.Disk.Mounts) != 1 || cfg.Alerts.Disk.Mounts[0] != "/" {
 		t.Errorf("example disk mounts: got %v", cfg.Alerts.Disk.Mounts)
+	}
+}
+
+func TestPressureContainerConfigParses(t *testing.T) {
+	cfg, err := LoadConfig("testdata/pressure-container.yaml")
+	if err != nil {
+		t.Fatalf("pressure container config should parse: %v", err)
+	}
+	if !cfg.Alerts.Pressure.Enabled || !cfg.Metrics.Enabled || cfg.CollectionInterval.Std() != 5*time.Second {
+		t.Fatalf("unexpected pressure container config: %+v", cfg)
 	}
 }
 

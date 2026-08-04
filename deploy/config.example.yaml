@@ -41,6 +41,28 @@ alerts:
     resolve_below: 80
     for: 2m
     severity: warning
+  # Linux Pressure Stall Information. These alerts measure time lost to
+  # contention rather than resource utilization. Requires /proc/pressure.
+  # Keep disabled until the thresholds have been evaluated for your workload.
+  pressure:
+    enabled: false
+    # CPU uses PSI "some"; system-wide CPU "full" is undefined.
+    cpu:
+      threshold: 20
+      resolve_below: 15
+      for: 2m
+      severity: warning
+    # Memory and I/O use PSI "full" (all non-idle work stalled).
+    memory:
+      threshold: 5
+      resolve_below: 3
+      for: 1m
+      severity: critical
+    io:
+      threshold: 10
+      resolve_below: 5
+      for: 2m
+      severity: warning
   swap:
     threshold: 80
     resolve_below: 75
